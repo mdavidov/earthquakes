@@ -1,0 +1,1509 @@
+        QPainter cachePainter(&m_backgroundCache);
+        if (m_highQualityRendering) {
+            cachePainter.setRenderHint(QPainter::Antialiasing);
+        }
+        
+        renderBackground(cachePainter);
+        renderMapLayers(cachePainter);
+        
+        m_backgroundCacheValid = true;
+    }
+    
+    painter.drawPixmap(0, 0, m_backgroundCache);
+    
+    // Render earthquakes and overlays
+    renderEarthquakes(painter);
+    if (m_settings.enableClustering) {
+        renderClusters(painter);
+    }
+    renderSelection(painter);
+    
+    if (m_settings.showLegend) {
+        renderLegend(painter);
+    }
+    
+    renderOverlay(painter);
+    
+    #ifdef QT_DEBUG
+    if (QApplication::keyboardModifiers() & Qt::ControlModifier) {
+        renderDebugInfo(painter);
+    }
+    #endif
+}
+
+void EarthquakeMapWidget::renderBackground(QPainter &painter) const
+{
+    // Draw background map if available
+    if (!m_backgroundMap.isNull()) {
+        painter.drawPixmap(rect(), m_backgroundMap, m_backgroundMap.rect());
+    }
+}
+
+void EarthquakeMapWidget::renderMapLayers(QPainter &painter) const
+{
+    if (m_settings.enabledLayers.contains(MapLayer::Continents)) {
+        renderContinents(painter);
+    }
+    
+    if (m_settings.enabledLayers.contains(MapLayer::Countries)) {
+        renderCountries(painter);
+    }
+    
+    if (m_settings.showGrid) {
+        renderGrid(painter);
+    }
+}
+
+void EarthquakeMapWidget::renderContinents(QPainter &painter) const
+{
+    painter.setPen(QPen(m_settings.coastlineColor, 1));
+    painter.setBrush(QColor(40, 60, 80, 128));
+    
+    for (const QPolygonF &continent : m_continentPolygons) {
+        QPolygonF screenPolygon;
+        for (const QPointF &point : continent) {
+            QPointF screenPoint = latLonToScreen(point.y(), point.x());
+            if (rect().contains(screenPoint.toPoint())) {
+                screenPolygon.append(screenPoint);
+            }
+        }
+        
+        if (screenPolygon.size() >= 3) {
+            painter.drawPolygon(screenPolygon);
+        }
+    }
+}
+
+void EarthquakeMapWidget::renderCountries(QPainter &painter) const
+{
+    painter.setPen(QPen(m_settings.coastlineColor.lighter(), 1, Qt::DotLine));
+    
+    for (const QPolygonF &country : m_countryPolygons) {
+        QPolygonF screenPolygon;
+        for (const QPointF &point : country) {
+            QPointF screenPoint = latLonToScreen(point.y(), point.x());
+            screenPolygon.append(screenPoint);
+        }
+        
+        if (screenPolygon.size() >= 2) {
+            painter.drawPolyline(screenPolygon);
+        }
+    }
+}
+
+void EarthquakeMapWidget::renderGrid(QPainter &painter) const
+{
+    painter.setPen(QPen(m_settings.gridColor, 1, Qt::DotLine));
+    
+    double spacing = m_settings.gridSpacing;
+    
+    // Latitude lines
+    for (double lat = -90; lat <= 90; lat += spacing) {
+        QPointF start = latLonToScreen(lat, -180);
+        QPointF end = latLonToScreen(lat, 180);
+        
+        if (rect().intersects(QRectF(start, end).normalized().toRect())) {
+            painter.drawLine(start, end);
+        }
+    }
+    
+    // Longitude lines  
+    for (double lon = -180; lon <= 180; lon += spacing) {
+        QPointF start = latLonToScreen(-90, lon);
+        QPointF end = latLonToScreen(90, lon);
+        
+        if (rect().intersects(QRectF(start, end).normalized().toRect())) {
+            painter.drawLine(start, end);
+        }
+    }
+}
+
+void EarthquakeMapWidget::renderEarthquakes(QPainter &painter) const
+{
+    QMutexLocker locker(&m_dataMutex);
+    
+    // Sort earthquakes by size (render smaller ones first)
+    QVector<int> indices;
+    for (int i = 0; i < m_earthquakes.size(); ++i) {
+        if (m_earthquakes[i].isVisible && !shouldSkipRendering(m_earthquakes[i])) {
+            indices.append(i);
+        }
+    }
+    
+    std::sort(indices.begin(), indices.end(), [this](int a, int b) {
+        return m_earthquakes[a].displaySize < m_earthquakes[b].displaySize;
+    });
+    
+    // Limit rendering count for performance
+    int maxRender = qMin(indices.size(), m_maxRenderingEarthquakes);
+    
+    for (int i = 0; i < maxRender; ++i) {
+        const VisualEarthquake &eq = m_earthquakes[indices[i]];
+        renderEarthquake(painter, eq);
+    }
+    
+    // Render labels separately on top
+    if (m_settings.showMagnitudeLabels || m_settings.showTimeLabels) {
+        renderEarthquakeLabels(painter);
+    }
+}
+
+void EarthquakeMapWidget::renderEarthquake(QPainter &painter, const VisualEarthquake &eq) const
+{
+    if (!isInViewport(eq.screenPos)) {
+        return;
+    }
+    
+    painter.save();
+    painter.setOpacity(eq.opacity * m_animationOpacity);
+    
+    switch (m_settings.displayMode) {
+        case EarthquakeDisplayMode::Circles:
+            renderEarthquakeCircle(painter, eq);
+            break;
+        case EarthquakeDisplayMode::Squares:
+            renderEarthquakeSquare(painter, eq);
+            break;
+        case EarthquakeDisplayMode::Diamonds:
+            renderEarthquakeDiamond(painter, eq);
+            break;
+        case EarthquakeDisplayMode::Crosses:
+            renderEarthquakeCross(painter, eq);
+            break;
+        case EarthquakeDisplayMode::Heatmap:
+            // Handled separately in renderEarthquakeHeatmap
+            break;
+        default:
+            renderEarthquakeCircle(painter, eq);
+            break;
+    }
+    
+    painter.restore();
+}
+
+void EarthquakeMapWidget::renderEarthquakeCircle(QPainter &painter, const VisualEarthquake &eq) const
+{
+    double size = getScaledSize(eq.displaySize);
+    
+    // Apply animation effects
+    if (m_settings.animationStyle != AnimationStyle::None && m_settings.enableAnimation) {
+        double animValue = getAnimationValue(m_settings.animationStyle, eq.animationPhase);
+        size *= animValue;
+    }
+    
+    QColor baseColor = eq.displayColor;
+    QColor borderColor = baseColor.darker(150);
+    
+    // Highlight effect
+    if (eq.isHighlighted) {
+        baseColor = baseColor.lighter(150);
+        borderColor = QColor(255, 255, 100);
+        size *= 1.3;
+    }
+    
+    // Selection effect
+    if (eq.isSelected) {
+        borderColor = QColor(100, 150, 255);
+        painter.setPen(QPen(borderColor, 3));
+    } else {
+        painter.setPen(QPen(borderColor, 1));
+    }
+    
+    painter.setBrush(baseColor);
+    
+    QRectF rect(eq.screenPos.x() - size/2, eq.screenPos.y() - size/2, size, size);
+    painter.drawEllipse(rect);
+    
+    // Draw magnitude text for larger earthquakes
+    if (eq.data.magnitude >= 5.0 && size > 15) {
+        painter.setPen(Qt::white);
+        painter.setFont(QFont("Arial", qMax(8, int(size/3))));
+        QString magText = QString::number(eq.data.magnitude, 'f', 1);
+        painter.drawText(rect, Qt::AlignCenter, magText);
+    }
+}
+
+void EarthquakeMapWidget::renderEarthquakeSquare(QPainter &painter, const VisualEarthquake &eq) const
+{
+    double size = getScaledSize(eq.displaySize);
+    
+    if (m_settings.animationStyle != AnimationStyle::None && m_settings.enableAnimation) {
+        double animValue = getAnimationValue(m_settings.animationStyle, eq.animationPhase);
+        size *= animValue;
+    }
+    
+    QColor baseColor = eq.displayColor;
+    QColor borderColor = baseColor.darker(150);
+    
+    if (eq.isHighlighted) {
+        baseColor = baseColor.lighter(150);
+        size *= 1.3;
+    }
+    
+    painter.setPen(QPen(borderColor, eq.isSelected ? 3 : 1));
+    painter.setBrush(baseColor);
+    
+    QRectF rect(eq.screenPos.x() - size/2, eq.screenPos.y() - size/2, size, size);
+    painter.drawRect(rect);
+}
+
+void EarthquakeMapWidget::renderEarthquakeDiamond(QPainter &painter, const VisualEarthquake &eq) const
+{
+    double size = getScaledSize(eq.displaySize);
+    
+    if (m_settings.animationStyle != AnimationStyle::None && m_settings.enableAnimation) {
+        double animValue = getAnimationValue(m_settings.animationStyle, eq.animationPhase);
+        size *= animValue;
+    }
+    
+    QColor baseColor = eq.displayColor;
+    QColor borderColor = baseColor.darker(150);
+    
+    if (eq.isHighlighted) {
+        baseColor = baseColor.lighter(150);
+        size *= 1.3;
+    }
+    
+    painter.setPen(QPen(borderColor, eq.isSelected ? 3 : 1));
+    painter.setBrush(baseColor);
+    
+    // Create diamond shape
+    QPolygonF diamond;
+    double halfSize = size / 2;
+    diamond << QPointF(eq.screenPos.x(), eq.screenPos.y() - halfSize)      // top
+            << QPointF(eq.screenPos.x() + halfSize, eq.screenPos.y())      // right
+            << QPointF(eq.screenPos.x(), eq.screenPos.y() + halfSize)      // bottom
+            << QPointF(eq.screenPos.x() - halfSize, eq.screenPos.y());     // left
+    
+    painter.drawPolygon(diamond);
+}
+
+void EarthquakeMapWidget::renderEarthquakeCross(QPainter &painter, const VisualEarthquake &eq) const
+{
+    double size = getScaledSize(eq.displaySize);
+    
+    if (m_settings.animationStyle != AnimationStyle::None && m_settings.enableAnimation) {
+        double animValue = getAnimationValue(m_settings.animationStyle, eq.animationPhase);
+        size *= animValue;
+    }
+    
+    QColor color = eq.displayColor;
+    if (eq.isHighlighted) {
+        color = color.lighter(150);
+        size *= 1.3;
+    }
+    
+    painter.setPen(QPen(color, eq.isSelected ? 4 : 2));
+    
+    double halfSize = size / 2;
+    
+    // Horizontal line
+    painter.drawLine(eq.screenPos.x() - halfSize, eq.screenPos.y(),
+                    eq.screenPos.x() + halfSize, eq.screenPos.y());
+    
+    // Vertical line
+    painter.drawLine(eq.screenPos.x(), eq.screenPos.y() - halfSize,
+                    eq.screenPos.x(), eq.screenPos.y() + halfSize);
+}
+
+void EarthquakeMapWidget::renderEarthquakeLabels(QPainter &painter) const
+{
+    QMutexLocker locker(&m_dataMutex);
+    
+    painter.setPen(Qt::white);
+    painter.setFont(QFont("Arial", 9, QFont::Bold));
+    
+    for (const VisualEarthquake &eq : m_earthquakes) {
+        if (!eq.isVisible || !isInViewport(eq.screenPos)) {
+            continue;
+        }
+        
+        QString label;
+        if (m_settings.showMagnitudeLabels && eq.data.magnitude >= 4.0) {
+            label = QString("M%1").arg(eq.data.magnitude, 0, 'f', 1);
+        }
+        
+        if (m_settings.showTimeLabels) {
+            QString timeStr = eq.data.timestamp.toString("hh:mm");
+            label += (label.isEmpty() ? "" : " ") + timeStr;
+        }
+        
+        if (!label.isEmpty()) {
+            QRectF textRect = painter.fontMetrics().boundingRect(label);
+            QPointF textPos = eq.screenPos + QPointF(eq.displaySize/2 + 5, -eq.displaySize/2);
+            
+            // Background for better readability
+            painter.fillRect(textRect.translated(textPos), QColor(0, 0, 0, 128));
+            painter.drawText(textPos, label);
+        }
+    }
+}
+
+void EarthquakeMapWidget::renderClusters(QPainter &painter) const
+{
+    for (const EarthquakeCluster &cluster : m_clusters) {
+        if (cluster.earthquakeIds.size() < 2) {
+            continue;
+        }
+        
+        painter.save();
+        
+        // Cluster background circle
+        painter.setPen(QPen(cluster.displayColor.darker(), 2));
+        painter.setBrush(QColor(cluster.displayColor.red(), cluster.displayColor.green(), 
+                               cluster.displayColor.blue(), 180));
+        
+        double radius = cluster.displaySize;
+        QRectF clusterRect(cluster.centerPos.x() - radius, cluster.centerPos.y() - radius,
+                          radius * 2, radius * 2);
+        painter.drawEllipse(clusterRect);
+        
+        // Cluster count text
+        painter.setPen(Qt::white);
+        painter.setFont(QFont("Arial", qMax(10, int(radius/3)), QFont::Bold));
+        painter.drawText(clusterRect, Qt::AlignCenter, QString::number(cluster.earthquakeIds.size()));
+        
+        // Magnitude indicator
+        if (cluster.maxMagnitude >= 5.0) {
+            painter.setPen(QPen(Qt::yellow, 2));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawEllipse(clusterRect.adjusted(-3, -3, 3, 3));
+        }
+        
+        painter.restore();
+    }
+}
+
+void EarthquakeMapWidget::renderSelection(QPainter &painter) const
+{
+    // Render selection rubber band
+    if (m_selectionBand && m_selectionBand->isVisible()) {
+        // Qt handles this automatically
+    }
+    
+    // Render selection highlights
+    painter.setPen(QPen(QColor(100, 150, 255), 3));
+    painter.setBrush(Qt::NoBrush);
+    
+    QMutexLocker locker(&m_dataMutex);
+    for (const VisualEarthquake &eq : m_earthquakes) {
+        if (eq.isSelected && isInViewport(eq.screenPos)) {
+            double size = getScaledSize(eq.displaySize) + 6;
+            QRectF rect(eq.screenPos.x() - size/2, eq.screenPos.y() - size/2, size, size);
+            painter.drawEllipse(rect);
+        }
+    }
+}
+
+void EarthquakeMapWidget::renderLegend(QPainter &painter) const
+{
+    QRect legendRect(width() - 220, 20, 200, 250);
+    
+    // Background
+    painter.fillRect(legendRect, QColor(0, 0, 0, 180));
+    painter.setPen(Qt::white);
+    painter.drawRect(legendRect);
+    
+    // Title
+    painter.setFont(QFont("Arial", 12, QFont::Bold));
+    painter.drawText(legendRect.x() + 10, legendRect.y() + 20, "Earthquake Legend");
+    
+    // Magnitude scale
+    painter.setFont(QFont("Arial", 9));
+    int y = legendRect.y() + 45;
+    
+    for (double mag = 2.0; mag <= 8.0; mag += 1.0) {
+        QColor color = getMagnitudeColor(mag);
+        double size = DEFAULT_EARTHQUAKE_SIZE * (mag / 4.0);
+        size = qBound(4.0, size, 25.0);
+        
+        painter.setBrush(color);
+        painter.setPen(color.darker());
+        painter.drawEllipse(legendRect.x() + 15, y - size/2, size, size);
+        
+        painter.setPen(Qt::white);
+        painter.drawText(legendRect.x() + 40, y + 4, QString("M%1").arg(mag, 0, 'f', 1));
+        y += 25;
+    }
+    
+    // Color scheme info
+    y += 10;
+    painter.setFont(QFont("Arial", 9, QFont::Bold));
+    painter.drawText(legendRect.x() + 10, y, "Color by:");
+    y += 15;
+    painter.setFont(QFont("Arial", 8));
+    
+    QString colorSchemeText;
+    switch (m_settings.colorScheme) {
+        case ColorScheme::Magnitude: colorSchemeText = "Magnitude"; break;
+        case ColorScheme::Depth: colorSchemeText = "Depth"; break;
+        case ColorScheme::Age: colorSchemeText = "Age"; break;
+        case ColorScheme::AlertLevel: colorSchemeText = "Alert Level"; break;
+        case ColorScheme::DataSource: colorSchemeText = "Data Source"; break;
+        default: colorSchemeText = "Custom"; break;
+    }
+    painter.drawText(legendRect.x() + 10, y, colorSchemeText);
+    
+    // Statistics
+    y += 25;
+    painter.setFont(QFont("Arial", 8));
+    QMutexLocker locker(&m_dataMutex);
+    painter.drawText(legendRect.x() + 10, y, QString("Total: %1").arg(m_earthquakes.size()));
+    y += 15;
+    
+    int visible = 0;
+    for (const auto &eq : m_earthquakes) {
+        if (eq.isVisible) visible++;
+    }
+    painter.drawText(legendRect.x() + 10, y, QString("Visible: %1").arg(visible));
+}
+
+void EarthquakeMapWidget::renderOverlay(QPainter &painter) const
+{
+    // Render scale bar
+    if (m_zoomLevel > 0.1) {
+        renderScaleBar(painter);
+    }
+    
+    // Render coordinates display
+    if (underMouse()) {
+        QPoint mousePos = mapFromGlobal(QCursor::pos());
+        if (rect().contains(mousePos)) {
+            QPointF latLon = screenToLatLon(mousePos);
+            QString coordsText = formatCoordinate(latLon.y(), true) + ", " + 
+                               formatCoordinate(latLon.x(), false);
+            
+            painter.setPen(Qt::white);
+            painter.setFont(QFont("Arial", 9));
+            painter.fillRect(10, height() - 25, 200, 20, QColor(0, 0, 0, 128));
+            painter.drawText(15, height() - 10, coordsText);
+        }
+    }
+}
+
+void EarthquakeMapWidget::renderScaleBar(QPainter &painter) const
+{
+    // Calculate scale bar length in pixels and km
+    double kmPerPixel = (EARTH_RADIUS_KM * 2 * M_PI) / (360.0 * m_zoomLevel * width());
+    
+    // Find appropriate scale bar length
+    QVector<double> scaleOptions = {1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000};
+    double scaleKm = 100; // Default
+    
+    for (double option : scaleOptions) {
+        double pixelLength = option / kmPerPixel;
+        if (pixelLength >= 50 && pixelLength <= 150) {
+            scaleKm = option;
+            break;
+        }
+    }
+    
+    double scalePixels = scaleKm / kmPerPixel;
+    
+    // Draw scale bar
+    QRect scaleRect(width() - 150, height() - 40, scalePixels, 20);
+    
+    painter.fillRect(scaleRect, QColor(255, 255, 255, 200));
+    painter.setPen(Qt::black);
+    painter.drawRect(scaleRect);
+    
+    // Scale text
+    QString scaleText = scaleKm < 1000 ? 
+                       QString("%1 km").arg(scaleKm) :
+                       QString("%1k km").arg(scaleKm / 1000);
+    
+    painter.setFont(QFont("Arial", 8));
+    painter.drawText(scaleRect.x(), scaleRect.y() - 5, scaleText);
+}
+
+void EarthquakeMapWidget::renderDebugInfo(QPainter &painter) const
+{
+    painter.setPen(Qt::yellow);
+    painter.setFont(QFont("Courier", 9));
+    
+    QStringList debugInfo;
+    debugInfo << QString("Center: %1, %2").arg(m_centerLatitude, 0, 'f', 4).arg(m_centerLongitude, 0, 'f', 4);
+    debugInfo << QString("Zoom: %1").arg(m_zoomLevel, 0, 'f', 2);
+    debugInfo << QString("Earthquakes: %1 total, %2 visible").arg(m_earthquakes.size()).arg(getVisibleEarthquakes().size());
+    debugInfo << QString("Clusters: %1").arg(m_clusters.size());
+    debugInfo << QString("Animation Frame:// EarthquakeMapWidget.hpp
+#ifndef EARTHQUAKEMAPWIDGET_HPP
+#define EARTHQUAKEMAPWIDGET_HPP
+
+#include <QtWidgets/QWidget>
+#include <QtGui/QPainter>
+#include <QtGui/QPixmap>
+#include <QtGui/QMouseEvent>
+#include <QtGui/QWheelEvent>
+#include <QtGui/QKeyEvent>
+#include <QtGui/QResizeEvent>
+#include <QtGui/QPaintEvent>
+#include <QtGui/QContextMenuEvent>
+#include <QtCore/QTimer>
+#include <QtCore/QDateTime>
+#include <QtCore/QPropertyAnimation>
+#include <QtCore/QEasingCurve>
+#include <QtCore/QParallelAnimationGroup>
+#include <QtCore/QSequentialAnimationGroup>
+#include <QtCore/QSettings>
+#include <QtWidgets/QMenu>
+#include <QtWidgets/QAction>
+#include <QtWidgets/QToolTip>
+#include <QtWidgets/QRubberBand>
+#include <QtNetwork/QNetworkAccessManager>
+#include <QtNetwork/QNetworkRequest>
+#include <QtNetwork/QNetworkReply>
+#include <QVector>
+#include <QMap>
+#include <QMutex>
+#include <QMutexLocker>
+#include <cmath>
+
+// Forward declarations
+class SpatialUtils;
+struct EarthquakeData;
+
+enum class MapProjection {
+    Mercator,
+    Equirectangular,
+    OrthographicNorthPole,
+    OrthographicSouthPole,
+    Robinson
+};
+
+enum class MapLayer {
+    Continents,
+    Countries,
+    States,
+    Cities,
+    PlateB boundaries,
+    Topography,
+    Bathymetry,
+    Roads,
+    Custom
+};
+
+enum class EarthquakeDisplayMode {
+    Circles,
+    Squares,
+    Diamonds,
+    Crosses,
+    Heatmap,
+    Density,
+    Animation
+};
+
+enum class ColorScheme {
+    Magnitude,
+    Depth,
+    Age,
+    AlertLevel,
+    DataSource,
+    Custom
+};
+
+enum class AnimationStyle {
+    None,
+    Pulse,
+    Ripple,
+    Fade,
+    Grow,
+    Shake
+};
+
+struct MapBounds {
+    double minLatitude;
+    double maxLatitude;
+    double minLongitude;
+    double maxLongitude;
+    
+    bool contains(double lat, double lon) const {
+        return lat >= minLatitude && lat <= maxLatitude &&
+               lon >= minLongitude && lon <= maxLongitude;
+    }
+    
+    bool isValid() const {
+        return minLatitude < maxLatitude && minLongitude < maxLongitude;
+    }
+    
+    double width() const { return maxLongitude - minLongitude; }
+    double height() const { return maxLatitude - minLatitude; }
+    QPointF center() const { 
+        return QPointF((minLongitude + maxLongitude) / 2.0, 
+                      (minLatitude + maxLatitude) / 2.0); 
+    }
+};
+
+struct MapSettings {
+    MapProjection projection = MapProjection::Mercator;
+    QVector<MapLayer> enabledLayers = {MapLayer::Continents, MapLayer::Countries};
+    EarthquakeDisplayMode displayMode = EarthquakeDisplayMode::Circles;
+    ColorScheme colorScheme = ColorScheme::Magnitude;
+    AnimationStyle animationStyle = AnimationStyle::Pulse;
+    bool showGrid = true;
+    bool showLegend = true;
+    bool showTooltips = true;
+    bool showMagnitudeLabels = true;
+    bool showTimeLabels = false;
+    bool enableClustering = true;
+    bool enableFiltering = true;
+    bool enableAnimation = true;
+    double gridSpacing = 15.0; // degrees
+    double clusterDistance = 50.0; // pixels
+    double animationSpeed = 1.0; // multiplier
+    int maxVisibleEarthquakes = 5000;
+    QColor backgroundColor = QColor(20, 30, 50);
+    QColor gridColor = QColor(60, 80, 100);
+    QColor coastlineColor = QColor(100, 120, 140);
+};
+
+struct VisualEarthquake {
+    EarthquakeData data;
+    QPointF screenPos;
+    double displaySize;
+    QColor displayColor;
+    double opacity;
+    double animationPhase;
+    bool isVisible;
+    bool isHighlighted;
+    bool isSelected;
+    QDateTime lastUpdate;
+    int clusterId;
+    bool isClusterCenter;
+    QVector<int> clusteredIds;
+};
+
+struct EarthquakeCluster {
+    QPointF centerPos;
+    QVector<int> earthquakeIds;
+    double avgMagnitude;
+    double maxMagnitude;
+    QDateTime latestTime;
+    QColor displayColor;
+    double displaySize;
+    bool isExpanded;
+};
+
+class EarthquakeMapWidget : public QWidget
+{
+    Q_OBJECT
+    
+    // Properties for animation and binding
+    Q_PROPERTY(double centerLatitude READ getCenterLatitude WRITE setCenterLatitude NOTIFY centerChanged)
+    Q_PROPERTY(double centerLongitude READ getCenterLongitude WRITE setCenterLongitude NOTIFY centerChanged)
+    Q_PROPERTY(double zoomLevel READ getZoomLevel WRITE setZoomLevel NOTIFY zoomChanged)
+    Q_PROPERTY(double animationOpacity READ getAnimationOpacity WRITE setAnimationOpacity)
+
+public:
+    explicit EarthquakeMapWidget(QWidget *parent = nullptr);
+    ~EarthquakeMapWidget();
+
+    // Core functionality
+    void addEarthquake(const EarthquakeData &earthquake);
+    void addEarthquakes(const QVector<EarthquakeData> &earthquakes);
+    void removeEarthquake(const QString &eventId);
+    void clearEarthquakes();
+    void updateEarthquake(const EarthquakeData &earthquake);
+    
+    // Map control
+    void setCenter(double latitude, double longitude);
+    void setCenterLatitude(double latitude);
+    void setCenterLongitude(double longitude);
+    void setZoomLevel(double zoom);
+    void zoomIn();
+    void zoomOut();
+    void fitToEarthquakes();
+    void fitToBounds(const MapBounds &bounds);
+    
+    // View settings
+    void setMapSettings(const MapSettings &settings);
+    MapSettings getMapSettings() const;
+    void setProjection(MapProjection projection);
+    void setDisplayMode(EarthquakeDisplayMode mode);
+    void setColorScheme(ColorScheme scheme);
+    void setAnimationStyle(AnimationStyle style);
+    
+    // Layer management
+    void setLayerEnabled(MapLayer layer, bool enabled);
+    bool isLayerEnabled(MapLayer layer) const;
+    void setBackgroundMap(const QPixmap &map);
+    void loadBackgroundMapFromUrl(const QString &url);
+    
+    // Selection and interaction
+    QVector<EarthquakeData> getSelectedEarthquakes() const;
+    EarthquakeData getEarthquakeAt(const QPoint &point) const;
+    QVector<EarthquakeData> getEarthquakesInRegion(const MapBounds &bounds) const;
+    void selectEarthquake(const QString &eventId);
+    void selectEarthquakes(const QStringList &eventIds);
+    void clearSelection();
+    
+    // Filtering and clustering
+    void setMagnitudeFilter(double minMag, double maxMag);
+    void setDepthFilter(double minDepth, double maxDepth);
+    void setTimeFilter(const QDateTime &startTime, const QDateTime &endTime);
+    void setLocationFilter(const MapBounds &bounds);
+    void enableClustering(bool enabled);
+    void setClusterDistance(double pixels);
+    
+    // Animation and effects
+    void startAnimation();
+    void stopAnimation();
+    void setAnimationSpeed(double speed);
+    void highlightEarthquake(const QString &eventId, int durationMs = 3000);
+    void flashEarthquake(const QString &eventId, int times = 3);
+    void animateToLocation(double latitude, double longitude, double zoom = -1, int durationMs = 1000);
+    
+    // Export and utility
+    QPixmap renderToPixmap(const QSize &size = QSize()) const;
+    void exportToImage(const QString &fileName, const QSize &size = QSize()) const;
+    QByteArray exportToSvg(const QSize &size = QSize()) const;
+    void saveSettings() const;
+    void loadSettings();
+    
+    // Getters
+    double getCenterLatitude() const { return m_centerLatitude; }
+    double getCenterLongitude() const { return m_centerLongitude; }
+    double getZoomLevel() const { return m_zoomLevel; }
+    double getAnimationOpacity() const { return m_animationOpacity; }
+    MapBounds getVisibleBounds() const;
+    QVector<EarthquakeData> getAllEarthquakes() const;
+    QVector<EarthquakeData> getVisibleEarthquakes() const;
+    int getEarthquakeCount() const;
+    QDateTime getLastUpdateTime() const;
+
+signals:
+    void earthquakeClicked(const EarthquakeData &earthquake);
+    void earthquakeDoubleClicked(const EarthquakeData &earthquake);
+    void earthquakeHovered(const EarthquakeData &earthquake);
+    void earthquakeSelected(const QStringList &eventIds);
+    void mapClicked(double latitude, double longitude);
+    void centerChanged(double latitude, double longitude);
+    void zoomChanged(double zoom);
+    void boundsChanged(const MapBounds &bounds);
+    void selectionChanged(const QVector<EarthquakeData> &selected);
+    void contextMenuRequested(const QPoint &position, const EarthquakeData &earthquake);
+    void backgroundMapLoaded();
+    void animationFrameUpdated(int frame);
+
+protected:
+    // Event handling
+    void paintEvent(QPaintEvent *event) override;
+    void mousePressEvent(QMouseEvent *event) override;
+    void mouseMoveEvent(QMouseEvent *event) override;
+    void mouseReleaseEvent(QMouseEvent *event) override;
+    void mouseDoubleClickEvent(QMouseEvent *event) override;
+    void wheelEvent(QWheelEvent *event) override;
+    void keyPressEvent(QKeyEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
+    void contextMenuEvent(QContextMenuEvent *event) override;
+    void leaveEvent(QEvent *event) override;
+
+private slots:
+    void updateAnimation();
+    void onNetworkReplyFinished();
+    void onAnimationFinished();
+    void onSelectionAnimationFinished();
+
+private:
+    // Initialization
+    void initializeWidget();
+    void initializeAnimations();
+    void initializeContextMenu();
+    void loadDefaultMapData();
+    void setupRenderingHints();
+    
+    // Coordinate transformation
+    QPointF latLonToScreen(double latitude, double longitude) const;
+    QPointF screenToLatLon(const QPointF &screen) const;
+    QPointF projectCoordinate(double latitude, double longitude) const;
+    QPointF unprojectCoordinate(const QPointF &projected) const;
+    
+    // Projection implementations
+    QPointF mercatorProjection(double lat, double lon) const;
+    QPointF equirectangularProjection(double lat, double lon) const;
+    QPointF orthographicProjection(double lat, double lon, bool northPole) const;
+    QPointF robinsonProjection(double lat, double lon) const;
+    
+    // Rendering methods
+    void renderBackground(QPainter &painter) const;
+    void renderMapLayers(QPainter &painter) const;
+    void renderContinents(QPainter &painter) const;
+    void renderCountries(QPainter &painter) const;
+    void renderGrid(QPainter &painter) const;
+    void renderEarthquakes(QPainter &painter) const;
+    void renderClusters(QPainter &painter) const;
+    void renderSelection(QPainter &painter) const;
+    void renderLegend(QPainter &painter) const;
+    void renderOverlay(QPainter &painter) const;
+    void renderDebugInfo(QPainter &painter) const;
+    
+    // Earthquake rendering
+    void renderEarthquake(QPainter &painter, const VisualEarthquake &eq) const;
+    void renderEarthquakeCircle(QPainter &painter, const VisualEarthquake &eq) const;
+    void renderEarthquakeSquare(QPainter &painter, const VisualEarthquake &eq) const;
+    void renderEarthquakeDiamond(QPainter &painter, const VisualEarthquake &eq) const;
+    void renderEarthquakeCross(QPainter &painter, const VisualEarthquake &eq) const;
+    void renderEarthquakeHeatmap(QPainter &painter) const;
+    void renderEarthquakeLabels(QPainter &painter) const;
+    
+    // Color and styling
+    QColor getEarthquakeColor(const EarthquakeData &earthquake) const;
+    QColor getMagnitudeColor(double magnitude) const;
+    QColor getDepthColor(double depth) const;
+    QColor getAgeColor(const QDateTime &timestamp) const;
+    QColor getAlertLevelColor(int alertLevel) const;
+    double getEarthquakeSize(const EarthquakeData &earthquake) const;
+    double getScaledSize(double baseSize) const;
+    
+    // Clustering
+    void updateClusters();
+    void clearClusters();
+    bool shouldCluster(const VisualEarthquake &eq1, const VisualEarthquake &eq2) const;
+    EarthquakeCluster createCluster(const QVector<int> &earthquakeIds);
+    void expandCluster(int clusterId);
+    void collapseCluster(int clusterId);
+    
+    // Filtering and culling
+    void updateVisibleEarthquakes();
+    bool isEarthquakeVisible(const EarthquakeData &earthquake) const;
+    bool passesFilters(const EarthquakeData &earthquake) const;
+    bool isInViewport(const QPointF &screenPos) const;
+    
+    // Hit testing
+    int findEarthquakeAt(const QPoint &point) const;
+    QVector<int> findEarthquakesInRect(const QRect &rect) const;
+    double distanceToEarthquake(const QPoint &point, int earthquakeIndex) const;
+    
+    // Animation helpers
+    void updateEarthquakeAnimations();
+    double calculateAnimationPhase(const EarthquakeData &earthquake) const;
+    double getAnimationValue(AnimationStyle style, double phase) const;
+    void setAnimationOpacity(double opacity) { m_animationOpacity = opacity; update(); }
+    
+    // Map data management
+    void updateBackgroundCache();
+    void loadBuiltinMapData();
+    void processMapTiles();
+    void cacheMapSegment(const MapBounds &bounds, const QPixmap &segment);
+    QPixmap getCachedMapSegment(const MapBounds &bounds) const;
+    
+    // Performance optimization
+    void optimizeForPerformance();
+    void updateLevelOfDetail();
+    bool shouldSkipRendering(const VisualEarthquake &eq) const;
+    void cullOffscreenEarthquakes();
+    void spatialIndex();
+    
+    // Utility methods
+    MapBounds calculateBounds(const QVector<EarthquakeData> &earthquakes) const;
+    double calculateOptimalZoom(const MapBounds &bounds) const;
+    QString formatCoordinate(double value, bool isLatitude) const;
+    QString formatEarthquakeTooltip(const EarthquakeData &earthquake) const;
+    void showTooltip(const QPoint &pos, const QString &text);
+    void hideTooltip();
+
+private:
+    // Core data
+    QVector<VisualEarthquake> m_earthquakes;
+    QVector<EarthquakeCluster> m_clusters;
+    QStringList m_selectedIds;
+    QMutex m_dataMutex;
+    
+    // Map state
+    double m_centerLatitude;
+    double m_centerLongitude;
+    double m_zoomLevel;
+    MapSettings m_settings;
+    MapBounds m_visibleBounds;
+    
+    // Interaction state
+    bool m_isPanning;
+    bool m_isSelecting;
+    QPoint m_lastMousePos;
+    QPoint m_panStartPos;
+    QPointF m_panStartCenter;
+    QRubberBand *m_selectionBand;
+    QPoint m_selectionStart;
+    QString m_hoveredEarthquakeId;
+    
+    // Animation system
+    QTimer *m_animationTimer;
+    QPropertyAnimation *m_centerAnimation;
+    QPropertyAnimation *m_zoomAnimation;
+    QParallelAnimationGroup *m_moveAnimationGroup;
+    int m_animationFrame;
+    double m_animationOpacity;
+    bool m_animationEnabled;
+    
+    // Rendering cache
+    mutable QPixmap m_backgroundCache;
+    mutable QPixmap m_layerCache;
+    mutable bool m_backgroundCacheValid;
+    mutable bool m_layerCacheValid;
+    mutable QSize m_lastSize;
+    
+    // Map data
+    QPixmap m_backgroundMap;
+    QVector<QPolygonF> m_continentPolygons;
+    QVector<QPolygonF> m_countryPolygons;
+    QMap<MapBounds, QPixmap> m_mapTileCache;
+    
+    // Network for map loading
+    QNetworkAccessManager *m_networkManager;
+    
+    // Filtering
+    double m_minMagnitude;
+    double m_maxMagnitude;
+    double m_minDepth;
+    double m_maxDepth;
+    QDateTime m_startTime;
+    QDateTime m_endTime;
+    MapBounds m_locationFilter;
+    bool m_hasLocationFilter;
+    
+    // Performance settings
+    bool m_highQualityRendering;
+    int m_maxRenderingEarthquakes;
+    double m_lodThreshold;
+    bool m_enableCaching;
+    
+    // Context menu
+    QMenu *m_contextMenu;
+    QAction *m_zoomInAction;
+    QAction *m_zoomOutAction;
+    QAction *m_centerHereAction;
+    QAction *m_selectAllAction;
+    QAction *m_clearSelectionAction;
+    QAction *m_copyLocationAction;
+    QAction *m_exportImageAction;
+    
+    // Constants
+    static const double MIN_ZOOM;
+    static const double MAX_ZOOM;
+    static const double ZOOM_FACTOR;
+    static const int ANIMATION_FPS;
+    static const int MAX_TOOLTIP_WIDTH;
+    static const double EARTH_RADIUS_KM;
+    static const double DEFAULT_EARTHQUAKE_SIZE;
+    static const int CLUSTER_EXPAND_DURATION_MS;
+};
+
+#endif // EARTHQUAKEMAPWIDGET_HPP
+
+// EarthquakeMapWidget.cpp
+#include "EarthquakeMapWidget.hpp"
+#include "SpatialUtils.h"
+#include <QtCore/QDebug>
+#include <QtCore/QSettings>
+#include <QtCore/QStandardPaths>
+#include <QtWidgets/QApplication>
+#include <QtWidgets/QToolTip>
+#include <QtWidgets/QRubberBand>
+#include <QtGui/QPainterPath>
+#include <QtGui/QPixmap>
+#include <QtCore/QJsonDocument>
+#include <QtCore/QJsonObject>
+#include <QtCore/QJsonArray>
+#include <QtSvg/QSvgGenerator>
+
+// Forward declaration of EarthquakeData
+struct EarthquakeData {
+    double latitude;
+    double longitude;
+    double magnitude;
+    double depth;
+    QDateTime timestamp;
+    QString location;
+    int alertLevel;
+    QString eventId;
+    QString dataSource;
+    double uncertainty;
+    QString tsunamiFlag;
+    QString reviewStatus;
+};
+
+// Constants
+const double EarthquakeMapWidget::MIN_ZOOM = 0.1;
+const double EarthquakeMapWidget::MAX_ZOOM = 50.0;
+const double EarthquakeMapWidget::ZOOM_FACTOR = 1.5;
+const int EarthquakeMapWidget::ANIMATION_FPS = 30;
+const int EarthquakeMapWidget::MAX_TOOLTIP_WIDTH = 300;
+const double EarthquakeMapWidget::EARTH_RADIUS_KM = 6371.0;
+const double EarthquakeMapWidget::DEFAULT_EARTHQUAKE_SIZE = 8.0;
+const int EarthquakeMapWidget::CLUSTER_EXPAND_DURATION_MS = 300;
+
+EarthquakeMapWidget::EarthquakeMapWidget(QWidget *parent)
+    : QWidget(parent)
+    , m_centerLatitude(0.0)
+    , m_centerLongitude(0.0)
+    , m_zoomLevel(1.0)
+    , m_isPanning(false)
+    , m_isSelecting(false)
+    , m_selectionBand(nullptr)
+    , m_animationTimer(nullptr)
+    , m_centerAnimation(nullptr)
+    , m_zoomAnimation(nullptr)
+    , m_moveAnimationGroup(nullptr)
+    , m_animationFrame(0)
+    , m_animationOpacity(1.0)
+    , m_animationEnabled(true)
+    , m_backgroundCacheValid(false)
+    , m_layerCacheValid(false)
+    , m_networkManager(nullptr)
+    , m_minMagnitude(0.0)
+    , m_maxMagnitude(10.0)
+    , m_minDepth(0.0)
+    , m_maxDepth(1000.0)
+    , m_hasLocationFilter(false)
+    , m_highQualityRendering(true)
+    , m_maxRenderingEarthquakes(10000)
+    , m_lodThreshold(0.5)
+    , m_enableCaching(true)
+    , m_contextMenu(nullptr)
+{
+    initializeWidget();
+    initializeAnimations();
+    initializeContextMenu();
+    loadDefaultMapData();
+    loadSettings();
+}
+
+EarthquakeMapWidget::~EarthquakeMapWidget()
+{
+    saveSettings();
+    
+    if (m_animationTimer) {
+        m_animationTimer->stop();
+    }
+    
+    clearClusters();
+}
+
+void EarthquakeMapWidget::initializeWidget()
+{
+    // Widget setup
+    setMinimumSize(400, 300);
+    setMouseTracking(true);
+    setFocusPolicy(Qt::StrongFocus);
+    setAttribute(Qt::WA_OpaquePaintEvent);
+    setAttribute(Qt::WA_NoSystemBackground);
+    
+    // Initialize bounds
+    updateVisibleBounds();
+    
+    // Initialize network manager
+    m_networkManager = new QNetworkAccessManager(this);
+    connect(m_networkManager, &QNetworkAccessManager::finished,
+            this, &EarthquakeMapWidget::onNetworkReplyFinished);
+    
+    // Setup rendering
+    setupRenderingHints();
+    
+    qDebug() << "EarthquakeMapWidget initialized";
+}
+
+void EarthquakeMapWidget::initializeAnimations()
+{
+    // Main animation timer
+    m_animationTimer = new QTimer(this);
+    connect(m_animationTimer, &QTimer::timeout, this, &EarthquakeMapWidget::updateAnimation);
+    m_animationTimer->start(1000 / ANIMATION_FPS); // 30 FPS
+    
+    // Center animation
+    m_centerAnimation = new QPropertyAnimation(this, "centerLatitude", this);
+    m_centerAnimation->setDuration(1000);
+    m_centerAnimation->setEasingCurve(QEasingCurve::InOutQuad);
+    connect(m_centerAnimation, &QPropertyAnimation::finished, 
+            this, &EarthquakeMapWidget::onAnimationFinished);
+    
+    // Zoom animation
+    m_zoomAnimation = new QPropertyAnimation(this, "zoomLevel", this);
+    m_zoomAnimation->setDuration(800);
+    m_zoomAnimation->setEasingCurve(QEasingCurve::InOutQuad);
+    
+    // Parallel animation group for coordinated movements
+    m_moveAnimationGroup = new QParallelAnimationGroup(this);
+    m_moveAnimationGroup->addAnimation(m_centerAnimation);
+    m_moveAnimationGroup->addAnimation(m_zoomAnimation);
+    
+    qDebug() << "Animation system initialized";
+}
+
+void EarthquakeMapWidget::initializeContextMenu()
+{
+    m_contextMenu = new QMenu(this);
+    
+    m_zoomInAction = m_contextMenu->addAction("Zoom In");
+    m_zoomInAction->setShortcut(QKeySequence::ZoomIn);
+    connect(m_zoomInAction, &QAction::triggered, this, &EarthquakeMapWidget::zoomIn);
+    
+    m_zoomOutAction = m_contextMenu->addAction("Zoom Out");
+    m_zoomOutAction->setShortcut(QKeySequence::ZoomOut);
+    connect(m_zoomOutAction, &QAction::triggered, this, &EarthquakeMapWidget::zoomOut);
+    
+    m_contextMenu->addSeparator();
+    
+    m_centerHereAction = m_contextMenu->addAction("Center Here");
+    connect(m_centerHereAction, &QAction::triggered, [this]() {
+        QPoint pos = m_contextMenu->pos();
+        QPointF latLon = screenToLatLon(mapFromGlobal(pos));
+        setCenter(latLon.y(), latLon.x());
+    });
+    
+    m_contextMenu->addSeparator();
+    
+    m_selectAllAction = m_contextMenu->addAction("Select All Visible");
+    m_selectAllAction->setShortcut(QKeySequence::SelectAll);
+    connect(m_selectAllAction, &QAction::triggered, [this]() {
+        QStringList visibleIds;
+        for (const auto &eq : m_earthquakes) {
+            if (eq.isVisible) {
+                visibleIds.append(eq.data.eventId);
+            }
+        }
+        selectEarthquakes(visibleIds);
+    });
+    
+    m_clearSelectionAction = m_contextMenu->addAction("Clear Selection");
+    connect(m_clearSelectionAction, &QAction::triggered, this, &EarthquakeMapWidget::clearSelection);
+    
+    m_contextMenu->addSeparator();
+    
+    m_copyLocationAction = m_contextMenu->addAction("Copy Coordinates");
+    connect(m_copyLocationAction, &QAction::triggered, [this]() {
+        QPoint pos = m_contextMenu->pos();
+        QPointF latLon = screenToLatLon(mapFromGlobal(pos));
+        QString coords = QString("%1, %2").arg(latLon.y(), 0, 'f', 6).arg(latLon.x(), 0, 'f', 6);
+        QApplication::clipboard()->setText(coords);
+    });
+    
+    m_exportImageAction = m_contextMenu->addAction("Export as Image...");
+    connect(m_exportImageAction, &QAction::triggered, [this]() {
+        QString fileName = QString("earthquake_map_%1.png")
+                          .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd_hh-mm-ss"));
+        exportToImage(fileName);
+    });
+}
+
+void EarthquakeMapWidget::loadDefaultMapData()
+{
+    // Load simplified world map data
+    // In a real implementation, this would load from GeoJSON or Shapefile
+    
+    // Create simplified continent polygons
+    QPolygonF northAmerica;
+    northAmerica << QPointF(-150, 70) << QPointF(-50, 70) 
+                 << QPointF(-80, 25) << QPointF(-120, 10) << QPointF(-150, 70);
+    m_continentPolygons.append(northAmerica);
+    
+    QPolygonF southAmerica;
+    southAmerica << QPointF(-80, 15) << QPointF(-40, 15)
+                 << QPointF(-50, -55) << QPointF(-80, -20) << QPointF(-80, 15);
+    m_continentPolygons.append(southAmerica);
+    
+    QPolygonF eurasia;
+    eurasia << QPointF(-10, 75) << QPointF(180, 75)
+            << QPointF(140, 10) << QPointF(30, 35) << QPointF(-10, 75);
+    m_continentPolygons.append(eurasia);
+    
+    QPolygonF africa;
+    africa << QPointF(-20, 35) << QPointF(50, 35)
+           << QPointF(40, -35) << QPointF(10, -35) << QPointF(-20, 35);
+    m_continentPolygons.append(africa);
+    
+    QPolygonF australia;
+    australia << QPointF(110, -10) << QPointF(155, -10)
+              << QPointF(155, -45) << QPointF(110, -45) << QPointF(110, -10);
+    m_continentPolygons.append(australia);
+    
+    m_backgroundCacheValid = false;
+    m_layerCacheValid = false;
+    
+    qDebug() << "Default map data loaded";
+}
+
+void EarthquakeMapWidget::setupRenderingHints()
+{
+    // This will be used in paintEvent for consistent rendering quality
+}
+
+void EarthquakeMapWidget::addEarthquake(const EarthquakeData &earthquake)
+{
+    QMutexLocker locker(&m_dataMutex);
+    
+    // Check if earthquake already exists
+    for (int i = 0; i < m_earthquakes.size(); ++i) {
+        if (m_earthquakes[i].data.eventId == earthquake.eventId) {
+            // Update existing earthquake
+            m_earthquakes[i].data = earthquake;
+            m_earthquakes[i].lastUpdate = QDateTime::currentDateTime();
+            updateVisibleEarthquakes();
+            update();
+            return;
+        }
+    }
+    
+    // Add new earthquake
+    VisualEarthquake visualEq;
+    visualEq.data = earthquake;
+    visualEq.screenPos = latLonToScreen(earthquake.latitude, earthquake.longitude);
+    visualEq.displaySize = getEarthquakeSize(earthquake);
+    visualEq.displayColor = getEarthquakeColor(earthquake);
+    visualEq.opacity = 1.0;
+    visualEq.animationPhase = 0.0;
+    visualEq.isVisible = isEarthquakeVisible(earthquake);
+    visualEq.isHighlighted = false;
+    visualEq.isSelected = false;
+    visualEq.lastUpdate = QDateTime::currentDateTime();
+    visualEq.clusterId = -1;
+    visualEq.isClusterCenter = false;
+    
+    m_earthquakes.append(visualEq);
+    
+    // Update clustering if enabled
+    if (m_settings.enableClustering) {
+        updateClusters();
+    }
+    
+    updateVisibleEarthquakes();
+    update();
+    
+    qDebug() << "Added earthquake:" << earthquake.eventId << "M" << earthquake.magnitude;
+}
+
+void EarthquakeMapWidget::addEarthquakes(const QVector<EarthquakeData> &earthquakes)
+{
+    QMutexLocker locker(&m_dataMutex);
+    
+    for (const auto &earthquake : earthquakes) {
+        // Check for duplicates
+        bool exists = false;
+        for (int i = 0; i < m_earthquakes.size(); ++i) {
+            if (m_earthquakes[i].data.eventId == earthquake.eventId) {
+                m_earthquakes[i].data = earthquake;
+                m_earthquakes[i].lastUpdate = QDateTime::currentDateTime();
+                exists = true;
+                break;
+            }
+        }
+        
+        if (!exists) {
+            VisualEarthquake visualEq;
+            visualEq.data = earthquake;
+            visualEq.screenPos = latLonToScreen(earthquake.latitude, earthquake.longitude);
+            visualEq.displaySize = getEarthquakeSize(earthquake);
+            visualEq.displayColor = getEarthquakeColor(earthquake);
+            visualEq.opacity = 1.0;
+            visualEq.animationPhase = 0.0;
+            visualEq.isVisible = isEarthquakeVisible(earthquake);
+            visualEq.isHighlighted = false;
+            visualEq.isSelected = false;
+            visualEq.lastUpdate = QDateTime::currentDateTime();
+            visualEq.clusterId = -1;
+            visualEq.isClusterCenter = false;
+            
+            m_earthquakes.append(visualEq);
+        }
+    }
+    
+    if (m_settings.enableClustering) {
+        updateClusters();
+    }
+    
+    updateVisibleEarthquakes();
+    update();
+    
+    qDebug() << "Added" << earthquakes.size() << "earthquakes, total:" << m_earthquakes.size();
+}
+
+void EarthquakeMapWidget::removeEarthquake(const QString &eventId)
+{
+    QMutexLocker locker(&m_dataMutex);
+    
+    for (int i = 0; i < m_earthquakes.size(); ++i) {
+        if (m_earthquakes[i].data.eventId == eventId) {
+            m_earthquakes.removeAt(i);
+            m_selectedIds.removeAll(eventId);
+            
+            if (m_settings.enableClustering) {
+                updateClusters();
+            }
+            
+            updateVisibleEarthquakes();
+            update();
+            
+            qDebug() << "Removed earthquake:" << eventId;
+            return;
+        }
+    }
+}
+
+void EarthquakeMapWidget::clearEarthquakes()
+{
+    QMutexLocker locker(&m_dataMutex);
+    
+    m_earthquakes.clear();
+    m_selectedIds.clear();
+    clearClusters();
+    
+    update();
+    
+    qDebug() << "Cleared all earthquakes";
+}
+
+void EarthquakeMapWidget::setCenter(double latitude, double longitude)
+{
+    latitude = qBound(-90.0, latitude, 90.0);
+    longitude = SpatialUtils::normalizeLongitude(longitude);
+    
+    if (qAbs(m_centerLatitude - latitude) < 1e-6 && 
+        qAbs(m_centerLongitude - longitude) < 1e-6) {
+        return;
+    }
+    
+    m_centerLatitude = latitude;
+    m_centerLongitude = longitude;
+    
+    updateVisibleBounds();
+    updateVisibleEarthquakes();
+    
+    // Invalidate caches
+    m_backgroundCacheValid = false;
+    m_layerCacheValid = false;
+    
+    update();
+    
+    emit centerChanged(latitude, longitude);
+    emit boundsChanged(m_visibleBounds);
+}
+
+void EarthquakeMapWidget::setCenterLatitude(double latitude)
+{
+    setCenter(latitude, m_centerLongitude);
+}
+
+void EarthquakeMapWidget::setCenterLongitude(double longitude)
+{
+    setCenter(m_centerLatitude, longitude);
+}
+
+void EarthquakeMapWidget::setZoomLevel(double zoom)
+{
+    zoom = qBound(MIN_ZOOM, zoom, MAX_ZOOM);
+    
+    if (qAbs(m_zoomLevel - zoom) < 1e-6) {
+        return;
+    }
+    
+    m_zoomLevel = zoom;
+    
+    updateVisibleBounds();
+    updateVisibleEarthquakes();
+    
+    // Invalidate caches
+    m_backgroundCacheValid = false;
+    m_layerCacheValid = false;
+    
+    update();
+    
+    emit zoomChanged(zoom);
+    emit boundsChanged(m_visibleBounds);
+}
+
+void EarthquakeMapWidget::zoomIn()
+{
+    setZoomLevel(m_zoomLevel * ZOOM_FACTOR);
+}
+
+void EarthquakeMapWidget::zoomOut()
+{
+    setZoomLevel(m_zoomLevel / ZOOM_FACTOR);
+}
+
+void EarthquakeMapWidget::fitToEarthquakes()
+{
+    if (m_earthquakes.isEmpty()) {
+        return;
+    }
+    
+    QMutexLocker locker(&m_dataMutex);
+    
+    // Calculate bounds of all earthquakes
+    QVector<EarthquakeData> allEarthquakes;
+    for (const auto &visualEq : m_earthquakes) {
+        allEarthquakes.append(visualEq.data);
+    }
+    
+    MapBounds bounds = calculateBounds(allEarthquakes);
+    fitToBounds(bounds);
+}
+
+void EarthquakeMapWidget::fitToBounds(const MapBounds &bounds)
+{
+    if (!bounds.isValid()) {
+        return;
+    }
+    
+    // Calculate center
+    QPointF center = bounds.center();
+    
+    // Calculate zoom level to fit bounds
+    double zoom = calculateOptimalZoom(bounds);
+    
+    // Animate to new position
+    animateToLocation(center.y(), center.x(), zoom);
+}
+
+void EarthquakeMapWidget::animateToLocation(double latitude, double longitude, double zoom, int durationMs)
+{
+    if (m_moveAnimationGroup->state() == QAbstractAnimation::Running) {
+        m_moveAnimationGroup->stop();
+    }
+    
+    // Setup center animation
+    m_centerAnimation->setDuration(durationMs);
+    m_centerAnimation->setStartValue(m_centerLatitude);
+    m_centerAnimation->setEndValue(latitude);
+    
+    // Setup zoom animation if specified
+    if (zoom > 0) {
+        m_zoomAnimation->setDuration(durationMs);
+        m_zoomAnimation->setStartValue(m_zoomLevel);
+        m_zoomAnimation->setEndValue(zoom);
+    }
+    
+    // Start animation
+    if (zoom > 0) {
+        m_moveAnimationGroup->start();
+    } else {
+        m_centerAnimation->start();
+    }
+}
+
+void EarthquakeMapWidget::paintEvent(QPaintEvent *event)
+{
+    QPainter painter(this);
+    
+    if (m_highQualityRendering) {
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform);
+        painter.setRenderHint(QPainter::TextAntialiasing);
+    }
+    
+    // Clear background
+    painter.fillRect(rect(), m_settings.backgroundColor);
+    
+    // Update screen positions if needed
+    if (size() != m_lastSize) {
+        updateVisibleEarthquakes();
+        m_lastSize = size();
+        m_backgroundCacheValid = false;
+        m_layerCacheValid = false;
+    }
+    
+    // Render background (cached if possible)
+    if (!m_backgroundCacheValid || m_backgroundCache.size() != size()) {
+        m_backgroundCache = QPixmap(size());
+        m_backgroundCache.fill(Qt::transparent);
+        
+        QPainter cacheP

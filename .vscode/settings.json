@@ -1,0 +1,28 @@
+{
+    "cmake.configureEnvironment": {
+        "CMAKE_PREFIX_PATH": "/opt/Qt/6.9.1/macos"
+    },
+    "files.associations": {
+        "*.hpp": "cpp",
+        "*.hxx": "cpp",
+        "*.h": "cpp",
+        "*.cxx": "cpp",
+        "*.cpp": "cpp",
+        "*.qml": "qml",
+        "*.ui.qml": "qml",
+        "*.js": "javascript",
+        "*.ts": "typescript",
+        "*.json": "jsonc",
+        "*.md": "markdown",
+        "__bit_reference": "cpp",
+        "future": "cpp",
+        "ios": "cpp",
+        "string": "cpp",
+        "fstream": "cpp",
+        "mutex": "cpp",
+        "condition_variable": "cpp",
+        "shared_mutex": "cpp",
+        "stacktrace": "cpp",
+        "thread": "cpp"
+    }
+}

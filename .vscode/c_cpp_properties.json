@@ -1,0 +1,29 @@
+{
+    "configurations": [
+        {
+            "name": "Mac",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "/opt/homebrew/include/c++",
+                "/opt/homebrew/include",
+                "/opt/Qt/6.9.1/macos/include",
+                "/opt/Qt/6.9.1/macos/lib/QtCore.framework/Versions/A/Headers",
+                "/opt/Qt/6.9.1/macos/lib/QtQuick.framework/Versions/A/Headers",
+                "/opt/Qt/6.9.1/macos/lib/QtGui.framework/Versions/A/Headers",
+                "/opt/Qt/6.9.1/macos/lib/QtQml.framework/Versions/A/Headers",
+                "/opt/Qt/6.9.1/macos/lib/QtQmlMeta.framework/Versions/A/Headers",
+                "/opt/Qt/6.9.1/macos/lib/QtWidgets.framework/Versions/A/Headers/",
+                "/usr/local/include"
+            ],
+            "defines": [],
+            "macFrameworkPath": [
+                "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks"
+            ],
+            "compilerPath": "/usr/bin/clang++",
+            "cStandard": "c17",
+            "cppStandard": "c++23",
+            "intelliSenseMode": "${default}"
+        }
+    ],
+    "version": 4
+}

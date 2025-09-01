@@ -1,0 +1,1055 @@
+#include "EarthquakeApiClient.hpp"
+#include <QtCore/QJsonParseError>
+#include <QtCore/QUrlQuery>
+#include <QtCore/QStandardPaths>
+#include <QtCore/QCoreApplication>
+#include <QtNetwork/QSslSocket>
+
+// Constants
+const int EarthquakeApiClient::DEFAULT_TIMEOUT_MS = 30000;
+const int EarthquakeApiClient::DEFAULT_MAX_RETRIES = 3;
+const int EarthquakeApiClient::DEFAULT_RATE_LIMIT_MS = 1000;
+const int EarthquakeApiClient::DEFAULT_CACHE_EXPIRY_MINUTES = 5;
+const int EarthquakeApiClient::DEFAULT_MAX_CACHE_SIZE = 100;
+const int EarthquakeApiClient::DEFAULT_MAX_CALLS_PER_MINUTE = 60;
+
+EarthquakeApiClient::EarthquakeApiClient(QObject *parent)
+    : QObject(parent)
+    , m_networkManager(nullptr)
+    , m_refreshTimer(nullptr)
+    , m_timeoutTimer(nullptr)
+    , m_rateLimitTimer(nullptr)
+    , m_queueTimer(nullptr)
+    , m_userAgent("EarthquakeAlertSystem/2.1")
+    , m_timeoutMs(DEFAULT_TIMEOUT_MS)
+    , m_maxRetries(DEFAULT_MAX_RETRIES)
+    , m_rateLimitDelayMs(DEFAULT_RATE_LIMIT_MS)
+    , m_refreshIntervalMinutes(5)
+    , m_isConnected(false)
+    , m_totalRequestsToday(0)
+    , m_successfulRequests(0)
+    , m_failedRequests(0)
+    , m_currentDataSource(ApiDataSource::USGS_All_Day)
+    , m_cacheExpiryMinutes(DEFAULT_CACHE_EXPIRY_MINUTES)
+    , m_maxCacheSize(DEFAULT_MAX_CACHE_SIZE)
+    , m_callsThisMinute(0)
+    , m_maxCallsPerMinute(DEFAULT_MAX_CALLS_PER_MINUTE)
+{
+    // Initialize network manager
+    m_networkManager = new QNetworkAccessManager(this);
+    connect(m_networkManager, &QNetworkAccessManager::finished,
+            this, &EarthquakeApiClient::onNetworkReplyFinished);
+    connect(m_networkManager, &QNetworkAccessManager::sslErrors,
+            this, &EarthquakeApiClient::onSslErrors);
+    
+    // Setup SSL configuration
+    QSslConfiguration sslConfig = QSslConfiguration::defaultConfiguration();
+    sslConfig.setProtocol(QSsl::TlsV1_2OrLater);
+    QSslConfiguration::setDefaultConfiguration(sslConfig);
+    
+    // Initialize timers
+    m_refreshTimer = new QTimer(this);
+    connect(m_refreshTimer, &QTimer::timeout, 
+            [this]() { fetchAllEarthquakes(m_currentDataSource); });
+    
+    m_timeoutTimer = new QTimer(this);
+    m_timeoutTimer->setSingleShot(true);
+    connect(m_timeoutTimer, &QTimer::timeout, this, &EarthquakeApiClient::onTimeout);
+    
+    m_rateLimitTimer = new QTimer(this);
+    m_rateLimitTimer->setSingleShot(true);
+    connect(m_rateLimitTimer, &QTimer::timeout, this, &EarthquakeApiClient::processRequestQueue);
+    
+    m_queueTimer = new QTimer(this);
+    connect(m_queueTimer, &QTimer::timeout, this, &EarthquakeApiClient::processRequestQueue);
+    m_queueTimer->start(100); // Process queue every 100ms
+    
+    // Initialize data sources
+    initializeDataSources();
+    
+    // Start with network status check
+    updateNetworkStatus();
+}
+
+EarthquakeApiClient::~EarthquakeApiClient()
+{
+    cancelAllRequests();
+}
+
+void EarthquakeApiClient::initializeDataSources()
+{
+    m_dataSources[ApiDataSource::USGS_All_Hour] = 
+        "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_hour.geojson";
+    m_dataSources[ApiDataSource::USGS_All_Day] = 
+        "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson";
+    m_dataSources[ApiDataSource::USGS_All_Week] = 
+        "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_week.geojson";
+    m_dataSources[ApiDataSource::USGS_All_Month] = 
+        "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_month.geojson";
+    m_dataSources[ApiDataSource::USGS_Significant_Month] = 
+        "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/significant_month.geojson";
+    m_dataSources[ApiDataSource::EMSC_Latest] = 
+        "https://www.seismicportal.eu/fdsnws/event/1/query?format=json&limit=1000";
+    m_dataSources[ApiDataSource::JMA_Latest] = 
+        "https://www.jma.go.jp/bosai/forecast/data/earthquake/";
+}
+
+void EarthquakeApiClient::setApiKey(const QString &apiKey)
+{
+    m_apiKey = apiKey;
+}
+
+void EarthquakeApiClient::setUserAgent(const QString &userAgent)
+{
+    m_userAgent = userAgent;
+}
+
+void EarthquakeApiClient::setTimeout(int timeoutMs)
+{
+    m_timeoutMs = qMax(1000, timeoutMs); // Minimum 1 second
+}
+
+void EarthquakeApiClient::setMaxRetries(int maxRetries)
+{
+    m_maxRetries = qBound(0, maxRetries, 10);
+}
+
+void EarthquakeApiClient::setRateLimitDelay(int delayMs)
+{
+    m_rateLimitDelayMs = qMax(100, delayMs);
+}
+
+void EarthquakeApiClient::setCustomApiUrl(const QString &url)
+{
+    m_customApiUrl = url;
+}
+
+void EarthquakeApiClient::fetchAllEarthquakes(ApiDataSource source)
+{
+    ApiRequest request;
+    request.type = ApiRequestType::InitialLoad;
+    request.source = source;
+    request.minMagnitude = 0.0;
+    request.maxMagnitude = 10.0;
+    request.minLatitude = -90.0;
+    request.maxLatitude = 90.0;
+    request.minLongitude = -180.0;
+    request.maxLongitude = 180.0;
+    request.retryCount = 0;
+    
+    enqueueRequest(request);
+}
+
+void EarthquakeApiClient::fetchRecentEarthquakes(int hours)
+{
+    ApiRequest request;
+    request.type = ApiRequestType::Refresh;
+    request.source = (hours <= 1) ? ApiDataSource::USGS_All_Hour : 
+                    (hours <= 24) ? ApiDataSource::USGS_All_Day :
+                    (hours <= 168) ? ApiDataSource::USGS_All_Week : 
+                    ApiDataSource::USGS_All_Month;
+    request.startTime = QDateTime::currentDateTimeUtc().addSecs(-hours * 3600);
+    request.endTime = QDateTime::currentDateTimeUtc();
+    request.minMagnitude = 0.0;
+    request.maxMagnitude = 10.0;
+    request.minLatitude = -90.0;
+    request.maxLatitude = 90.0;
+    request.minLongitude = -180.0;
+    request.maxLongitude = 180.0;
+    request.retryCount = 0;
+    
+    enqueueRequest(request);
+}
+
+void EarthquakeApiClient::fetchEarthquakesByRegion(double minLat, double maxLat, double minLon, double maxLon)
+{
+    ApiRequest request;
+    request.type = ApiRequestType::RegionalData;
+    request.source = ApiDataSource::USGS_All_Week; // Use week data for regional queries
+    request.minLatitude = qBound(-90.0, minLat, 90.0);
+    request.maxLatitude = qBound(-90.0, maxLat, 90.0);
+    request.minLongitude = qBound(-180.0, minLon, 180.0);
+    request.maxLongitude = qBound(-180.0, maxLon, 180.0);
+    request.minMagnitude = 0.0;
+    request.maxMagnitude = 10.0;
+    request.retryCount = 0;
+    
+    enqueueRequest(request);
+}
+
+void EarthquakeApiClient::fetchEarthquakesByMagnitude(double minMag, double maxMag)
+{
+    ApiRequest request;
+    request.type = ApiRequestType::InitialLoad;
+    request.source = ApiDataSource::USGS_All_Month;
+    request.minMagnitude = qBound(0.0, minMag, 10.0);
+    request.maxMagnitude = qBound(0.0, maxMag, 10.0);
+    request.minLatitude = -90.0;
+    request.maxLatitude = 90.0;
+    request.minLongitude = -180.0;
+    request.maxLongitude = 180.0;
+    request.retryCount = 0;
+    
+    enqueueRequest(request);
+}
+
+void EarthquakeApiClient::fetchEarthquakesByTimeRange(const QDateTime &start, const QDateTime &end)
+{
+    ApiRequest request;
+    request.type = ApiRequestType::HistoricalData;
+    request.source = ApiDataSource::Custom; // Use custom API for time range queries
+    request.startTime = start;
+    request.endTime = end;
+    request.minMagnitude = 0.0;
+    request.maxMagnitude = 10.0;
+    request.minLatitude = -90.0;
+    request.maxLatitude = 90.0;
+    request.minLongitude = -180.0;
+    request.maxLongitude = 180.0;
+    request.retryCount = 0;
+    
+    enqueueRequest(request);
+}
+
+void EarthquakeApiClient::fetchSpecificEarthquake(const QString &eventId)
+{
+    ApiRequest request;
+    request.type = ApiRequestType::SpecificEvent;
+    request.source = ApiDataSource::Custom;
+    request.eventId = eventId;
+    request.retryCount = 0;
+    
+    enqueueRequest(request);
+}
+
+void EarthquakeApiClient::fetchSignificantEarthquakes()
+{
+    ApiRequest request;
+    request.type = ApiRequestType::InitialLoad;
+    request.source = ApiDataSource::USGS_Significant_Month;
+    request.minMagnitude = 4.5; // Significant earthquakes threshold
+    request.maxMagnitude = 10.0;
+    request.minLatitude = -90.0;
+    request.maxLatitude = 90.0;
+    request.minLongitude = -180.0;
+    request.maxLongitude = 180.0;
+    request.retryCount = 0;
+    
+    enqueueRequest(request);
+}
+
+void EarthquakeApiClient::startAutoRefresh(int intervalMinutes)
+{
+    m_refreshIntervalMinutes = qMax(1, intervalMinutes); // Minimum 1 minute
+    m_refreshTimer->start(m_refreshIntervalMinutes * 60 * 1000);
+    qDebug() << "Auto-refresh started with interval:" << m_refreshIntervalMinutes << "minutes";
+}
+
+void EarthquakeApiClient::stopAutoRefresh()
+{
+    m_refreshTimer->stop();
+    qDebug() << "Auto-refresh stopped";
+}
+
+void EarthquakeApiClient::cancelAllRequests()
+{
+    QMutexLocker locker(&m_requestMutex);
+    
+    // Cancel active requests
+    for (auto &request : m_activeRequests) {
+        if (request.reply) {
+            request.reply->abort();
+            request.reply->deleteLater();
+        }
+    }
+    m_activeRequests.clear();
+    
+    // Clear queue
+    while (!m_requestQueue.isEmpty()) {
+        m_requestQueue.dequeue();
+    }
+    
+    qDebug() << "All API requests cancelled";
+}
+
+void EarthquakeApiClient::clearCache()
+{
+    m_responseCache.clear();
+    qDebug() << "API response cache cleared";
+}
+
+bool EarthquakeApiClient::isConnected() const
+{
+    return m_isConnected;
+}
+
+QDateTime EarthquakeApiClient::getLastUpdateTime() const
+{
+    return m_lastUpdateTime;
+}
+
+int EarthquakeApiClient::getPendingRequestsCount() const
+{
+    QMutexLocker locker(&m_requestMutex);
+    return m_requestQueue.size() + m_activeRequests.size();
+}
+
+QString EarthquakeApiClient::getLastError() const
+{
+    return m_lastError;
+}
+
+QVector<QString> EarthquakeApiClient::getAvailableDataSources() const
+{
+    return {"USGS All Hour", "USGS All Day", "USGS All Week", "USGS All Month", 
+            "USGS Significant", "EMSC Latest", "JMA Latest", "Custom"};
+}
+
+void EarthquakeApiClient::enqueueRequest(const ApiRequest &request)
+{
+    QMutexLocker locker(&m_requestMutex);
+    
+    // Check for duplicate requests
+    for (const auto &existing : m_requestQueue) {
+        if (existing.type == request.type && existing.source == request.source) {
+            qDebug() << "Duplicate request detected, skipping";
+            return;
+        }
+    }
+    
+    m_requestQueue.enqueue(request);
+    emit requestStarted(request.type);
+    
+    qDebug() << "Request enqueued, type:" << static_cast<int>(request.type) 
+             << "source:" << static_cast<int>(request.source);
+}
+
+void EarthquakeApiClient::executeRequest(const ApiRequest &request)
+{
+    if (isRateLimited()) {
+        // Re-queue the request to be processed later
+        QTimer::singleShot(m_rateLimitDelayMs, [this, request]() {
+            enqueueRequest(request);
+        });
+        emit rateLimitReached(m_rateLimitDelayMs);
+        return;
+    }
+    
+    QString url;
+    switch (request.source) {
+        case ApiDataSource::USGS_All_Hour:
+        case ApiDataSource::USGS_All_Day:
+        case ApiDataSource::USGS_All_Week:
+        case ApiDataSource::USGS_All_Month:
+        case ApiDataSource::USGS_Significant_Month:
+            url = buildUsgsUrl(request.source);
+            break;
+        case ApiDataSource::EMSC_Latest:
+            url = buildEmscUrl();
+            break;
+        case ApiDataSource::JMA_Latest:
+            url = buildJmaUrl();
+            break;
+        case ApiDataSource::Custom:
+            url = buildCustomUrl(request);
+            break;
+    }
+    
+    if (url.isEmpty()) {
+        handleRequestError(request, "Invalid API URL");
+        return;
+    }
+    
+    // Check cache first
+    QByteArray cachedData = getCachedResponse(url);
+    if (!cachedData.isEmpty()) {
+        qDebug() << "Using cached response for:" << url;
+        
+        QVector<EarthquakeData> earthquakes;
+        if (request.source == ApiDataSource::EMSC_Latest) {
+            earthquakes = parseEmscData(cachedData);
+        } else if (request.source == ApiDataSource::JMA_Latest) {
+            earthquakes = parseJmaData(cachedData);
+        } else {
+            earthquakes = parseUsgsGeoJson(cachedData, request.type);
+        }
+        
+        emit earthquakeDataReceived(earthquakes, request.type);
+        emit requestFinished(request.type, true);
+        return;
+    }
+    
+    // Create network request
+    QNetworkRequest netRequest(url);
+    netRequest.setHeader(QNetworkRequest::UserAgentHeader, m_userAgent);
+    netRequest.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    
+    if (!m_apiKey.isEmpty()) {
+        netRequest.setRawHeader("Authorization", QString("Bearer %1").arg(m_apiKey).toUtf8());
+    }
+    
+    // Set request timeout
+    netRequest.setAttribute(QNetworkRequest::RedirectPolicyAttribute, 
+                           QNetworkRequest::NoLessSafeRedirectPolicy);
+    
+    // Execute request
+    QNetworkReply *reply = m_networkManager->get(netRequest);
+    
+    // Store request context
+    ApiRequest activeRequest = request;
+    activeRequest.reply = reply;
+    
+    {
+        QMutexLocker locker(&m_requestMutex);
+        m_activeRequests.append(activeRequest);
+    }
+    
+    // Start timeout timer
+    m_timeoutTimer->start(m_timeoutMs);
+    
+    // Update rate limiting
+    m_lastApiCall = QDateTime::currentDateTimeUtc();
+    m_callsThisMinute++;
+    m_totalRequestsToday++;
+    
+    logApiCall(url, request.type);
+}
+
+void EarthquakeApiClient::onNetworkReplyFinished()
+{
+    QNetworkReply *reply = qobject_cast<QNetworkReply*>(sender());
+    if (!reply) return;
+    
+    // Find corresponding request
+    ApiRequest request;
+    bool requestFound = false;
+    
+    {
+        QMutexLocker locker(&m_requestMutex);
+        for (int i = 0; i < m_activeRequests.size(); ++i) {
+            if (m_activeRequests[i].reply == reply) {
+                request = m_activeRequests[i];
+                m_activeRequests.removeAt(i);
+                requestFound = true;
+                break;
+            }
+        }
+    }
+    
+    if (!requestFound) {
+        reply->deleteLater();
+        return;
+    }
+    
+    m_timeoutTimer->stop();
+    
+    if (reply->error() == QNetworkReply::NoError) {
+        QByteArray data = reply->readAll();
+        
+        // Cache successful response
+        cacheResponse(reply->url().toString(), data);
+        
+        try {
+            QVector<EarthquakeData> earthquakes;
+            
+            switch (request.source) {
+                case ApiDataSource::EMSC_Latest:
+                    earthquakes = parseEmscData(data);
+                    break;
+                case ApiDataSource::JMA_Latest:
+                    earthquakes = parseJmaData(data);
+                    break;
+                default:
+                    earthquakes = parseUsgsGeoJson(data, request.type);
+                    break;
+            }
+            
+            // Validate and filter data
+            QVector<EarthquakeData> validEarthquakes;
+            for (const auto &eq : earthquakes) {
+                if (validateEarthquakeData(eq) && 
+                    eq.magnitude >= request.minMagnitude && eq.magnitude <= request.maxMagnitude &&
+                    eq.latitude >= request.minLatitude && eq.latitude <= request.maxLatitude &&
+                    eq.longitude >= request.minLongitude && eq.longitude <= request.maxLongitude) {
+                    validEarthquakes.append(eq);
+                }
+            }
+            
+            m_lastUpdateTime = QDateTime::currentDateTimeUtc();
+            m_successfulRequests++;
+            m_isConnected = true;
+            
+            emit earthquakeDataReceived(validEarthquakes, request.type);
+            emit requestFinished(request.type, true);
+            emit networkStatusChanged(true);
+            
+            updateStatistics(validEarthquakes.size(), request.type);
+            
+            qDebug() << "Successfully parsed" << validEarthquakes.size() << "earthquakes";
+            
+        } catch (const std::exception &e) {
+            QString error = QString("Failed to parse earthquake data: %1").arg(e.what());
+            handleRequestError(request, error);
+        }
+        
+    } else {
+        QString error = QString("Network error: %1").arg(reply->errorString());
+        
+        if (reply->error() == QNetworkReply::TimeoutError ||
+            reply->error() == QNetworkReply::TemporaryNetworkFailureError ||
+            reply->error() == QNetworkReply::NetworkSessionFailedError) {
+            
+            // Retry on temporary network errors
+            if (request.retryCount < m_maxRetries) {
+                qDebug() << "Retrying request due to network error, attempt" << (request.retryCount + 1);
+                retryRequest(request);
+            } else {
+                handleRequestError(request, error);
+            }
+        } else {
+            handleRequestError(request, error);
+        }
+    }
+    
+    reply->deleteLater();
+}
+
+void EarthquakeApiClient::onSslErrors(const QList<QSslError> &errors)
+{
+    QNetworkReply *reply = qobject_cast<QNetworkReply*>(sender());
+    if (!reply) return;
+    
+    // Log SSL errors but continue (for development - in production, handle more carefully)
+    for (const QSslError &error : errors) {
+        qDebug() << "SSL Error:" << error.errorString();
+    }
+    
+    // Ignore SSL errors for now (in production, implement proper certificate validation)
+    reply->ignoreSslErrors();
+}
+
+void EarthquakeApiClient::onTimeout()
+{
+    qDebug() << "Request timeout occurred";
+    
+    // Find and cancel timed-out requests
+    QMutexLocker locker(&m_requestMutex);
+    for (auto &request : m_activeRequests) {
+        if (request.reply) {
+            request.reply->abort();
+            handleRequestError(request, "Request timeout");
+        }
+    }
+}
+
+void EarthquakeApiClient::processRequestQueue()
+{
+    if (isRateLimited()) {
+        return;
+    }
+    
+    QMutexLocker locker(&m_requestMutex);
+    if (m_requestQueue.isEmpty()) {
+        return;
+    }
+    
+    // Limit concurrent requests
+    if (m_activeRequests.size() >= 3) {
+        return;
+    }
+    
+    ApiRequest request = m_requestQueue.dequeue();
+    locker.unlock();
+    
+    executeRequest(request);
+}
+
+QString EarthquakeApiClient::buildUsgsUrl(ApiDataSource source) const
+{
+    QString baseUrl = m_dataSources.value(source);
+    
+    if (source == ApiDataSource::Custom && !m_customApiUrl.isEmpty()) {
+        baseUrl = m_customApiUrl;
+    }
+    
+    return baseUrl;
+}
+
+QString EarthquakeApiClient::buildEmscUrl() const
+{
+    QUrl url(m_dataSources.value(ApiDataSource::EMSC_Latest));
+    QUrlQuery query;
+    
+    // Add EMSC-specific parameters
+    query.addQueryItem("format", "json");
+    query.addQueryItem("limit", "1000");
+    query.addQueryItem("orderby", "time");
+    
+    url.setQuery(query);
+    return url.toString();
+}
+
+QString EarthquakeApiClient::buildJmaUrl() const
+{
+    // JMA (Japan Meteorological Agency) URL construction
+    return m_dataSources.value(ApiDataSource::JMA_Latest);
+}
+
+QString EarthquakeApiClient::buildCustomUrl(const ApiRequest &request) const
+{
+    if (request.type == ApiRequestType::SpecificEvent && !request.eventId.isEmpty()) {
+        return QString("https://earthquake.usgs.gov/earthquakes/eventpage/%1/executive").arg(request.eventId);
+    }
+    
+    // Build USGS earthquake API query URL for custom parameters
+    QUrl url("https://earthquake.usgs.gov/fdsnws/event/1/query");
+    QUrlQuery query;
+    
+    query.addQueryItem("format", "geojson");
+    query.addQueryItem("orderby", "time");
+    
+    if (request.startTime.isValid()) {
+        query.addQueryItem("starttime", request.startTime.toString(Qt::ISODate));
+    }
+    if (request.endTime.isValid()) {
+        query.addQueryItem("endtime", request.endTime.toString(Qt::ISODate));
+    }
+    if (request.minMagnitude > 0.0) {
+        query.addQueryItem("minmagnitude", QString::number(request.minMagnitude));
+    }
+    if (request.maxMagnitude < 10.0) {
+        query.addQueryItem("maxmagnitude", QString::number(request.maxMagnitude));
+    }
+    if (request.minLatitude > -90.0) {
+        query.addQueryItem("minlatitude", QString::number(request.minLatitude));
+    }
+    if (request.maxLatitude < 90.0) {
+        query.addQueryItem("maxlatitude", QString::number(request.maxLatitude));
+    }
+    if (request.minLongitude > -180.0) {
+        query.addQueryItem("minlongitude", QString::number(request.minLongitude));
+    }
+    if (request.maxLongitude < 180.0) {
+        query.addQueryItem("maxlongitude", QString::number(request.maxLongitude));
+    }
+    
+    url.setQuery(query);
+    return url.toString();
+}
+
+void EarthquakeApiClient::retryRequest(const ApiRequest &request)
+{
+    ApiRequest retryRequest = request;
+    retryRequest.retryCount++;
+    retryRequest.reply = nullptr;
+    
+    // Add exponential backoff delay
+    int delay = m_rateLimitDelayMs * (1 << retryRequest.retryCount); // 2^retry * base delay
+    delay = qMin(delay, 30000); // Maximum 30 second delay
+    
+    QTimer::singleShot(delay, [this, retryRequest]() {
+        enqueueRequest(retryRequest);
+    });
+}
+
+void EarthquakeApiClient::handleRequestError(const ApiRequest &request, const QString &error)
+{
+    m_lastError = error;
+    m_failedRequests++;
+    
+    if (m_successfulRequests == 0) {
+        m_isConnected = false;
+        emit networkStatusChanged(false);
+    }
+    
+    emit errorOccurred(error, request.type);
+    emit requestFinished(request.type, false);
+    
+    qDebug() << "Request error:" << error << "Type:" << static_cast<int>(request.type);
+}
+
+QVector<EarthquakeData> EarthquakeApiClient::parseUsgsGeoJson(const QByteArray &data, ApiRequestType requestType)
+{
+    QVector<EarthquakeData> earthquakes;
+    
+    QJsonParseError parseError;
+    QJsonDocument doc = QJsonDocument::fromJson(data, &parseError);
+    
+    if (parseError.error != QJsonParseError::NoError) {
+        throw std::runtime_error(QString("JSON parse error: %1").arg(parseError.errorString()).toStdString());
+    }
+    
+    QJsonObject root = doc.object();
+    QJsonArray features = root["features"].toArray();
+    
+    for (const auto &value : features) {
+        QJsonObject feature = value.toObject();
+        try {
+            EarthquakeData eq = parseUsgsFeature(feature, "USGS");
+            earthquakes.append(eq);
+        } catch (const std::exception &e) {
+            qDebug() << "Error parsing earthquake feature:" << e.what();
+            // Continue parsing other features
+        }
+    }
+    
+    qDebug() << "Parsed" << earthquakes.size() << "earthquakes from USGS GeoJSON";
+    return earthquakes;
+}
+
+QVector<EarthquakeData> EarthquakeApiClient::parseEmscData(const QByteArray &data)
+{
+    QVector<EarthquakeData> earthquakes;
+    
+    QJsonParseError parseError;
+    QJsonDocument doc = QJsonDocument::fromJson(data, &parseError);
+    
+    if (parseError.error != QJsonParseError::NoError) {
+        throw std::runtime_error(QString("EMSC JSON parse error: %1").arg(parseError.errorString()).toStdString());
+    }
+    
+    QJsonObject root = doc.object();
+    QJsonArray events = root["events"].toArray();
+    
+    for (const auto &value : events) {
+        QJsonObject event = value.toObject();
+        
+        EarthquakeData eq;
+        eq.eventId = event["eventid"].toString();
+        eq.latitude = event["lat"].toDouble();
+        eq.longitude = event["lon"].toDouble();
+        eq.magnitude = event["mag"].toDouble();
+        eq.depth = event["depth"].toDouble();
+        eq.timestamp = QDateTime::fromString(event["time"].toString(), Qt::ISODate);
+        eq.location = event["region"].toString();
+        eq.dataSource = "EMSC";
+        eq.uncertainty = event["maguncertainty"].toDouble();
+        eq.reviewStatus = event["evaluationmode"].toString();
+        
+        // Calculate alert level for EMSC data
+        if (eq.magnitude < 3.0) eq.alertLevel = 0;
+        else if (eq.magnitude < 4.0) eq.alertLevel = 1;
+        else if (eq.magnitude < 5.0) eq.alertLevel = 2;
+        else if (eq.magnitude < 6.0) eq.alertLevel = 3;
+        else eq.alertLevel = 4;
+        
+        earthquakes.append(eq);
+    }
+    
+    qDebug() << "Parsed" << earthquakes.size() << "earthquakes from EMSC";
+    return earthquakes;
+}
+
+QVector<EarthquakeData> EarthquakeApiClient::parseJmaData(const QByteArray &data)
+{
+    QVector<EarthquakeData> earthquakes;
+    
+    // JMA data parsing implementation
+    // Note: JMA uses a different format, this is a simplified implementation
+    QJsonParseError parseError;
+    QJsonDocument doc = QJsonDocument::fromJson(data, &parseError);
+    
+    if (parseError.error != QJsonParseError::NoError) {
+        throw std::runtime_error(QString("JMA JSON parse error: %1").arg(parseError.errorString()).toStdString());
+    }
+    
+    // JMA-specific parsing logic would go here
+    qDebug() << "JMA data parsing not fully implemented";
+    return earthquakes;
+}
+
+EarthquakeData EarthquakeApiClient::parseUsgsFeature(const QJsonObject &feature, const QString &source)
+{
+    EarthquakeData eq;
+    
+    QJsonObject properties = feature["properties"].toObject();
+    QJsonObject geometry = feature["geometry"].toObject();
+    QJsonArray coordinates = geometry["coordinates"].toArray();
+    
+    if (coordinates.size() < 2) {
+        throw std::runtime_error("Invalid coordinates in earthquake data");
+    }
+    
+    // Basic properties
+    eq.longitude = coordinates[0].toDouble();
+    eq.latitude = coordinates[1].toDouble();
+    eq.depth = coordinates.size() > 2 ? coordinates[2].toDouble() : 0.0;
+    eq.magnitude = properties["mag"].toDouble();
+    eq.location = properties["place"].toString();
+    eq.eventId = properties["ids"].toString().split(",").first(); // Take first ID
+    eq.dataSource = source;
+    
+    // Parse timestamp
+    qint64 timeMs = properties["time"].toVariant().toLongLong();
+    eq.timestamp = QDateTime::fromMSecsSinceEpoch(timeMs, Qt::UTC);
+    
+    // Additional USGS properties
+    eq.uncertainty = properties["magError"].toDouble();
+    eq.tsunamiFlag = properties["tsunami"].toInt() > 0 ? "Yes" : "No";
+    eq.reviewStatus = properties["status"].toString();
+    
+    // Calculate alert level based on magnitude and other factors
+    double mag = eq.magnitude;
+    if (mag < 2.5) eq.alertLevel = 0;      // Info
+    else if (mag < 4.0) eq.alertLevel = 1; // Minor
+    else if (mag < 5.0) eq.alertLevel = 2; // Moderate
+    else if (mag < 6.0) eq.alertLevel = 3; // Major
+    else eq.alertLevel = 4;                // Critical
+    
+    // Increase alert level for shallow earthquakes
+    if (eq.depth < 10.0 && eq.magnitude >= 4.0) {
+        eq.alertLevel = qMin(4, eq.alertLevel + 1);
+    }
+    
+    // Increase alert level for tsunami potential
+    if (eq.tsunamiFlag == "Yes") {
+        eq.alertLevel = qMin(4, eq.alertLevel + 1);
+    }
+    
+    return eq;
+}
+
+void EarthquakeApiClient::updateNetworkStatus()
+{
+    // Simple connectivity check by attempting to resolve a known host
+    QNetworkRequest request(QUrl("https://earthquake.usgs.gov"));
+    request.setHeader(QNetworkRequest::UserAgentHeader, m_userAgent);
+    
+    QNetworkReply *reply = m_networkManager->head(request);
+    connect(reply, &QNetworkReply::finished, [this, reply]() {
+        bool connected = (reply->error() == QNetworkReply::NoError);
+        if (m_isConnected != connected) {
+            m_isConnected = connected;
+            emit networkStatusChanged(connected);
+        }
+        reply->deleteLater();
+    });
+}
+
+bool EarthquakeApiClient::isRateLimited() const
+{
+    QDateTime now = QDateTime::currentDateTimeUtc();
+    
+    // Reset call counter every minute
+    if (m_lastApiCall.secsTo(now) >= 60) {
+        const_cast<EarthquakeApiClient*>(this)->m_callsThisMinute = 0;
+    }
+    
+    // Check if we've exceeded rate limit
+    return m_callsThisMinute >= m_maxCallsPerMinute ||
+           m_lastApiCall.msecsTo(now) < m_rateLimitDelayMs;
+}
+
+void EarthquakeApiClient::enforceRateLimit()
+{
+    if (isRateLimited()) {
+        int waitTime = m_rateLimitDelayMs - m_lastApiCall.msecsTo(QDateTime::currentDateTimeUtc());
+        if (waitTime > 0) {
+            m_rateLimitTimer->start(waitTime);
+            emit rateLimitReached(waitTime);
+        }
+    }
+}
+
+QString EarthquakeApiClient::formatApiUrl(const QString &baseUrl, const QUrlQuery &params) const
+{
+    QUrl url(baseUrl);
+    url.setQuery(params);
+    return url.toString();
+}
+
+void EarthquakeApiClient::logApiCall(const QString &url, ApiRequestType type)
+{
+    qDebug() << "API Call:" << static_cast<int>(type) << url;
+    
+    // Log to file in debug builds
+#ifdef QT_DEBUG
+    static QFile logFile(QStandardPaths::writableLocation(QStandardPaths::TempLocation) + "/earthquake_api.log");
+    if (!logFile.isOpen()) {
+        logFile.open(QIODevice::WriteOnly | QIODevice::Append);
+    }
+    
+    QTextStream stream(&logFile);
+    stream << QDateTime::currentDateTime().toString(Qt::ISODate) 
+           << " [" << static_cast<int>(type) << "] " << url << "\n";
+    stream.flush();
+#endif
+}
+
+void EarthquakeApiClient::updateStatistics(int earthquakeCount, ApiRequestType type)
+{
+    qDebug() << "Statistics update: Type" << static_cast<int>(type) 
+             << "Count:" << earthquakeCount 
+             << "Success rate:" << (double)m_successfulRequests / (m_successfulRequests + m_failedRequests) * 100.0 << "%";
+}
+
+bool EarthquakeApiClient::validateEarthquakeData(const EarthquakeData &earthquake) const
+{
+    return isValidCoordinate(earthquake.latitude, earthquake.longitude) &&
+           isValidMagnitude(earthquake.magnitude) &&
+           isValidDepth(earthquake.depth) &&
+           earthquake.timestamp.isValid() &&
+           !earthquake.location.isEmpty() &&
+           !earthquake.eventId.isEmpty();
+}
+
+bool EarthquakeApiClient::isValidCoordinate(double lat, double lon) const
+{
+    return lat >= -90.0 && lat <= 90.0 && lon >= -180.0 && lon <= 180.0;
+}
+
+bool EarthquakeApiClient::isValidMagnitude(double magnitude) const
+{
+    return magnitude >= -2.0 && magnitude <= 10.0; // Reasonable magnitude range
+}
+
+bool EarthquakeApiClient::isValidDepth(double depth) const
+{
+    return depth >= 0.0 && depth <= 1000.0; // Reasonable depth range in km
+}
+
+void EarthquakeApiClient::cacheResponse(const QString &url, const QByteArray &data)
+{
+    // Clean expired cache entries first
+    cleanExpiredCache();
+    
+    // Remove oldest entries if cache is full
+    if (m_responseCache.size() >= m_maxCacheSize) {
+        auto oldest = m_responseCache.begin();
+        QDateTime oldestTime = oldest->second;
+        
+        for (auto it = m_responseCache.begin(); it != m_responseCache.end(); ++it) {
+            if (it->second < oldestTime) {
+                oldest = it;
+                oldestTime = it->second;
+            }
+        }
+        m_responseCache.erase(oldest);
+    }
+    
+    m_responseCache[url] = qMakePair(data, QDateTime::currentDateTimeUtc());
+    qDebug() << "Cached response for:" << url << "Size:" << data.size() << "bytes";
+}
+
+QByteArray EarthquakeApiClient::getCachedResponse(const QString &url) const
+{
+    auto it = m_responseCache.find(url);
+    if (it != m_responseCache.end()) {
+        QDateTime cacheTime = it->second;
+        QDateTime expiry = cacheTime.addSecs(m_cacheExpiryMinutes * 60);
+        
+        if (QDateTime::currentDateTimeUtc() < expiry) {
+            return it->first;
+        }
+    }
+    
+    return QByteArray(); // Not found or expired
+}
+
+void EarthquakeApiClient::cleanExpiredCache()
+{
+    QDateTime now = QDateTime::currentDateTimeUtc();
+    
+    auto it = m_responseCache.begin();
+    while (it != m_responseCache.end()) {
+        QDateTime expiry = it->second.addSecs(m_cacheExpiryMinutes * 60);
+        if (now >= expiry) {
+            it = m_responseCache.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+/*
+// Example usage and integration:
+#include "earthquake_api_client.hpp"
+#include "earthquake_main_window.hpp"
+
+class EarthquakeApplication : public QObject
+{
+    Q_OBJECT
+
+public:
+    EarthquakeApplication(QObject *parent = nullptr) : QObject(parent)
+    {
+        m_apiClient = new EarthquakeApiClient(this);
+        m_mainWindow = new EarthquakeMainWindow;
+        
+        connectSignals();
+        configureApiClient();
+    }
+
+private slots:
+    void onEarthquakeDataReceived(const QVector<EarthquakeData> &earthquakes, ApiRequestType type)
+    {
+        // Forward data to main window
+        for (const auto &eq : earthquakes) {
+            m_mainWindow->addEarthquake(eq);
+        }
+        
+        qDebug() << "Received" << earthquakes.size() << "earthquakes, type:" << static_cast<int>(type);
+    }
+    
+    void onApiError(const QString &error, ApiRequestType type)
+    {
+        qDebug() << "API Error:" << error << "Type:" << static_cast<int>(type);
+        // Handle error in UI
+    }
+
+private:
+    void connectSignals()
+    {
+        connect(m_apiClient, &EarthquakeApiClient::earthquakeDataReceived,
+                this, &EarthquakeApplication::onEarthquakeDataReceived);
+        connect(m_apiClient, &EarthquakeApiClient::errorOccurred,
+                this, &EarthquakeApplication::onApiError);
+    }
+    
+    void configureApiClient()
+    {
+        m_apiClient->setUserAgent("EarthquakeAlertSystem/2.1");
+        m_apiClient->setTimeout(30000);
+        m_apiClient->setMaxRetries(3);
+        m_apiClient->setRateLimitDelay(1000);
+        
+        // Start auto-refresh every 5 minutes
+        m_apiClient->startAutoRefresh(5);
+        
+        // Initial data fetch
+        m_apiClient->fetchAllEarthquakes(ApiDataSource::USGS_All_Day);
+    }
+
+private:
+    EarthquakeApiClient *m_apiClient;
+    EarthquakeMainWindow *m_mainWindow;
+};
+
+// Usage examples:
+void exampleUsage()
+{
+    EarthquakeApiClient client;
+    
+    // Configure client
+    client.setUserAgent("MyApp/1.0");
+    client.setTimeout(15000);
+    client.setMaxRetries(2);
+    
+    // Fetch different types of data
+    client.fetchAllEarthquakes(ApiDataSource::USGS_All_Day);
+    client.fetchRecentEarthquakes(6); // Last 6 hours
+    client.fetchEarthquakesByMagnitude(5.0, 10.0); // M5.0+
+    client.fetchEarthquakesByRegion(32.0, 42.0, -125.0, -114.0); // California region
+    
+    // Time range query
+    QDateTime start = QDateTime::currentDateTimeUtc().addDays(-7);
+    QDateTime end = QDateTime::currentDateTimeUtc();
+    client.fetchEarthquakesByTimeRange(start, end);
+    
+    // Specific earthquake details
+    client.fetchSpecificEarthquake("us6000jllz");
+    
+    // Start monitoring with auto-refresh
+    client.startAutoRefresh(3); // Every 3 minutes
+}
+*/

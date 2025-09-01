@@ -1,0 +1,6 @@
+{
+    "name": "CMAKE_PREFIX_PATH",
+    "environmentVariables": {
+        "CMAKE_PREFIX_PATH": "/opt/Qt/6.9.1/macos"
+    }
+}
