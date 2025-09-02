@@ -7,7 +7,7 @@ EarthquakeData::EarthquakeData(const QJsonObject& feature) {
     auto geometry = feature["geometry"].toObject();
     auto coordinates = geometry["coordinates"].toArray();
     
-    id = feature["id"].toString();
+    eventId = feature["eventId"].toString();
     magnitude = properties["mag"].toDouble();
     place = properties["place"].toString();
     url = properties["url"].toString();

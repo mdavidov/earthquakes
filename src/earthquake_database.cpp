@@ -1,6 +1,6 @@
-earthquake_database.cpp
 
-#include "earthquake_database.h"
+#include "earthquake_database.hpp"
+
 #include <QSqlError>
 #include <QDebug>
 #include <QUuid>
@@ -32,7 +32,7 @@ bool EarthquakeDatabase::createTables() {
     
     QString createTableSQL = R"(
         CREATE TABLE IF NOT EXISTS earthquakes (
-            id TEXT PRIMARY KEY,
+            eventId TEXT PRIMARY KEY,
             magnitude REAL NOT NULL,
             latitude REAL NOT NULL,
             longitude REAL NOT NULL,
@@ -59,18 +59,18 @@ bool EarthquakeDatabase::createTables() {
 }
 
 bool EarthquakeDatabase::insertEarthquake(const EarthquakeData& data) {
-    if (earthquakeExists(data.id)) {
+    if (earthquakeExists(data.eventId)) {
         return true; // Already exists, skip
     }
     
     QSqlQuery query(db);
     query.prepare(R"(
         INSERT INTO earthquakes 
-        (id, magnitude, latitude, longitude, depth, timestamp, place, url, type)
+        (eventId, magnitude, latitude, longitude, depth, timestamp, place, url, type)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     )");
     
-    query.addBindValue(data.id);
+    query.addBindValue(data.eventId);
     query.addBindValue(data.magnitude);
     query.addBindValue(data.location.latitude());
     query.addBindValue(data.location.longitude());
@@ -149,7 +149,7 @@ std::vector<EarthquakeData> EarthquakeDatabase::getEarthquakes(
     
     while (query.next()) {
         EarthquakeData data;
-        data.id = query.value("id").toString();
+        data.eventId = query.value("eventId").toString();
         data.magnitude = query.value("magnitude").toDouble();
         data.location = QGeoCoordinate(
             query.value("latitude").toDouble(),
@@ -167,10 +167,10 @@ std::vector<EarthquakeData> EarthquakeDatabase::getEarthquakes(
     return results;
 }
 
-bool EarthquakeDatabase::earthquakeExists(const QString& id) {
+bool EarthquakeDatabase::earthquakeExists(const QString& eventId) {
     QSqlQuery query(db);
-    query.prepare("SELECT 1 FROM earthquakes WHERE id = ? LIMIT 1");
-    query.addBindValue(id);
+    query.prepare("SELECT 1 FROM earthquakes WHERE eventId = ? LIMIT 1");
+    query.addBindValue(eventId);
     
     return query.exec() && query.next();
 }

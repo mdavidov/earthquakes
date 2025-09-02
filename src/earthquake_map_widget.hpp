@@ -1,4 +1,7 @@
 #pragma once
+
+#include "earthquake_data.hpp"
+
 #include <QtWidgets/QWidget>
 #include <QtGui/QPainter>
 #include <QtGui/QPixmap>
@@ -16,7 +19,7 @@
 #include <QtCore/QSequentialAnimationGroup>
 #include <QtCore/QSettings>
 #include <QtWidgets/QMenu>
-#include <QtWidgets/QAction>
+#include <QAction>
 #include <QtWidgets/QToolTip>
 #include <QtWidgets/QRubberBand>
 #include <QtNetwork/QNetworkAccessManager>
@@ -27,25 +30,10 @@
 #include <QMutex>
 #include <QMutexLocker>
 #include <cmath>
+#include <QByteArray>
 
 // Forward declarations
 class SpatialUtils;
-
-// EarthquakeData structure
-struct EarthquakeData {
-    double latitude;
-    double longitude;
-    double magnitude;
-    double depth;
-    QDateTime timestamp;
-    QString location;
-    int alertLevel;
-    QString eventId;
-    QString dataSource;
-    double uncertainty;
-    QString tsunamiFlag;
-    QString reviewStatus;
-};
 
 // Enumerations
 enum class MapProjection {
@@ -107,7 +95,12 @@ struct MapBounds {
         return lat >= minLatitude && lat <= maxLatitude &&
                lon >= minLongitude && lon <= maxLongitude;
     }
-    
+
+    bool operator<(const MapBounds& other) const {
+        return std::tie(minLatitude, maxLatitude, minLongitude, maxLongitude) <
+               std::tie(other.minLatitude, other.maxLatitude, other.minLongitude, other.maxLongitude);
+    }
+
     bool isValid() const {
         return minLatitude < maxLatitude && minLongitude < maxLongitude;
     }
@@ -173,12 +166,13 @@ struct EarthquakeCluster {
 class EarthquakeMapWidget : public QWidget
 {
     Q_OBJECT
-    
     // Properties for animation and binding
     Q_PROPERTY(double centerLatitude READ getCenterLatitude WRITE setCenterLatitude NOTIFY centerChanged)
     Q_PROPERTY(double centerLongitude READ getCenterLongitude WRITE setCenterLongitude NOTIFY centerChanged)
     Q_PROPERTY(double zoomLevel READ getZoomLevel WRITE setZoomLevel NOTIFY zoomChanged)
     Q_PROPERTY(double animationOpacity READ getAnimationOpacity WRITE setAnimationOpacity)
+    Q_PROPERTY(bool showGrid READ getShowGrid WRITE setShowGrid NOTIFY showGridChanged)
+    Q_PROPERTY(bool showLegend READ getShowLegend WRITE setShowLegend NOTIFY showLegendChanged)
 
 public:
     explicit EarthquakeMapWidget(QWidget *parent = nullptr);
@@ -196,6 +190,10 @@ public:
     void setCenterLatitude(double latitude);
     void setCenterLongitude(double longitude);
     void setZoomLevel(double zoom);
+    bool getShowGrid() const { return m_showGrid; }
+    void setShowGrid(bool show);
+    bool getShowLegend() const { return m_showLegend; }
+    void setShowLegend(bool show);
     void zoomIn();
     void zoomOut();
     void fitToEarthquakes();
@@ -252,6 +250,7 @@ public:
     double getZoomLevel() const { return m_zoomLevel; }
     double getAnimationOpacity() const { return m_animationOpacity; }
     MapBounds getVisibleBounds() const;
+    void updateVisibleBounds();
     QVector<EarthquakeData> getAllEarthquakes() const;
     QVector<EarthquakeData> getVisibleEarthquakes() const;
     int getEarthquakeCount() const;
@@ -265,6 +264,8 @@ signals:
     void mapClicked(double latitude, double longitude);
     void centerChanged(double latitude, double longitude);
     void zoomChanged(double zoom);
+    void showGridChanged(bool show);
+    void showLegendChanged(bool show);
     void boundsChanged(const MapBounds &bounds);
     void selectionChanged(const QVector<EarthquakeData> &selected);
     void contextMenuRequested(const QPoint &position, const EarthquakeData &earthquake);
@@ -273,16 +274,38 @@ signals:
 
 protected:
     // Event handling
-    void paintEvent(QPaintEvent *event) override;
-    void mousePressEvent(QMouseEvent *event) override;
-    void mouseMoveEvent(QMouseEvent *event) override;
-    void mouseReleaseEvent(QMouseEvent *event) override;
-    void mouseDoubleClickEvent(QMouseEvent *event) override;
-    void wheelEvent(QWheelEvent *event) override;
-    void keyPressEvent(QKeyEvent *event) override;
-    void resizeEvent(QResizeEvent *event) override;
-    void contextMenuEvent(QContextMenuEvent *event) override;
-    void leaveEvent(QEvent *event) override;
+    void paintEvent(QPaintEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
+    void mouseDoubleClickEvent(QMouseEvent* event) override;
+    void wheelEvent(QWheelEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
+    void contextMenuEvent(QContextMenuEvent* event) override;
+    void leaveEvent(QEvent* event) override;
+
+    void renderBackgroundWithCache(QPainter& painter);
+    void renderDynamicContent(QPainter& painter);
+    void renderUIOverlays(QPainter& painter);
+    void renderEarthquakesOptimized(QPainter& painter);
+    void renderSingleEarthquake(QPainter& painter, const VisualEarthquake& eq);
+    void renderEarthquakeCircle(QPainter& painter, const QPointF& center,
+                                               double size, const QColor& fillColor,
+                                               const QColor& borderColor, bool selected);
+    void renderEarthquakeSquare(QPainter& painter, const QPointF& center,
+                                               double size, const QColor& fillColor,
+                                               const QColor& borderColor, bool selected);
+    void renderEarthquakeDiamond(QPainter& painter, const QPointF& center,
+                                                double size, const QColor& fillColor,
+                                                const QColor& borderColor, bool selected);
+    void renderEarthquakeCross(QPainter& painter, const QPointF& center,
+                                              double size, const QColor& color, bool selected);
+    void renderEarthquakeLabels(QPainter& painter, const QVector<int>& visibleIndices, int maxRender);
+    void renderSelection(QPainter& painter);
+    void renderHoverEffects(QPainter& painter);
+    void renderCoordinateDisplay(QPainter& painter);
+    void renderStatusOverlays(QPainter& painter);
 
 private slots:
     void updateAnimation();
@@ -332,7 +355,8 @@ private:
     void renderEarthquakeCross(QPainter &painter, const VisualEarthquake &eq) const;
     void renderEarthquakeHeatmap(QPainter &painter) const;
     void renderEarthquakeLabels(QPainter &painter) const;
-    
+
+public:
     // Color and styling
     QColor getEarthquakeColor(const EarthquakeData &earthquake) const;
     QColor getMagnitudeColor(double magnitude) const;
@@ -341,7 +365,8 @@ private:
     QColor getAlertLevelColor(int alertLevel) const;
     double getEarthquakeSize(const EarthquakeData &earthquake) const;
     double getScaledSize(double baseSize) const;
-    
+
+private:
     // Clustering
     void updateClusters();
     void clearClusters();
@@ -400,6 +425,8 @@ private:
     double m_centerLatitude;
     double m_centerLongitude;
     double m_zoomLevel;
+    bool m_showGrid;
+    bool m_showLegend;
     MapSettings m_settings;
     MapBounds m_visibleBounds;
     
@@ -474,3 +501,5 @@ private:
     static const double DEFAULT_EARTHQUAKE_SIZE;
     static const int CLUSTER_EXPAND_DURATION_MS;
 };
+
+Q_DECLARE_METATYPE(EarthquakeMapWidget)

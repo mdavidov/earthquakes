@@ -4,6 +4,7 @@
             "name": "Mac",
             "includePath": [
                 "${workspaceFolder}/**",
+                "${workspaceFolder}/src/**",
                 "/opt/homebrew/include/c++",
                 "/opt/homebrew/include",
                 "/opt/Qt/6.9.1/macos/include",

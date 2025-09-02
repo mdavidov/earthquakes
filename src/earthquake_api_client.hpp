@@ -1,6 +1,7 @@
 #pragma once
 
-#pragma once
+#include "earthquake_data.hpp"
+
 #include <QtCore/QObject>
 #include <QtCore/QTimer>
 #include <QtCore/QDateTime>
@@ -17,7 +18,8 @@
 #include <QQueue>
 #include <QMutex>
 #include <QMutexLocker>
-#include "earthquake_data.hpp"
+#include <QByteArray>
+
 
 enum class ApiDataSource {
     USGS_All_Hour,
@@ -57,7 +59,6 @@ struct ApiRequest {
 class EarthquakeApiClient : public QObject
 {
     Q_OBJECT
-
 public:
     explicit EarthquakeApiClient(QObject *parent = nullptr);
     ~EarthquakeApiClient();
@@ -104,9 +105,10 @@ signals:
 
 private slots:
     void onNetworkReplyFinished();
-    void onSslErrors(const QList<QSslError> &errors);
+    void onSslErrors(QNetworkReply* reply, const QList<QSslError>& errors);
     void onTimeout();
     void processRequestQueue();
+    void enqueueRequest(const ApiRequest& request);
 
 private:
     // URL building methods
@@ -116,17 +118,16 @@ private:
     QString buildCustomUrl(const ApiRequest &request) const;
     
     // Request management
-    void enqueueRequest(const ApiRequest &request);
-    void executeRequest(const ApiRequest &request);
-    void retryRequest(const ApiRequest &request);
-    void handleRequestError(const ApiRequest &request, const QString &error);
-    
+    void executeRequest(const ApiRequest& request);
+    void retryRequest(const ApiRequest& request);
+    void handleRequestError(const ApiRequest& request, const QString& error);
+
     // Data parsing methods
-    QVector<EarthquakeData> parseUsgsGeoJson(const QByteArray &data, ApiRequestType requestType);
-    QVector<EarthquakeData> parseEmscData(const QByteArray &data);
-    QVector<EarthquakeData> parseJmaData(const QByteArray &data);
-    EarthquakeData parseUsgsFeature(const QJsonObject &feature, const QString &source = "USGS");
-    
+    QVector<EarthquakeData> parseUsgsGeoJson(const QByteArray& data, ApiRequestType requestType);
+    QVector<EarthquakeData> parseEmscData(const QByteArray& data);
+    QVector<EarthquakeData> parseJmaData(const QByteArray& data);
+    EarthquakeData parseUsgsFeature(const QJsonObject& feature, const QString& source = "USGS");
+
     // Utility methods
     void updateNetworkStatus();
     bool isRateLimited() const;
@@ -134,6 +135,7 @@ private:
     QString formatApiUrl(const QString &baseUrl, const QUrlQuery &params) const;
     void logApiCall(const QString &url, ApiRequestType type);
     void updateStatistics(int earthquakeCount, ApiRequestType type);
+    void initializeDataSources();
     
     // Validation methods
     bool validateEarthquakeData(const EarthquakeData &earthquake) const;
@@ -142,18 +144,18 @@ private:
     bool isValidDepth(double depth) const;
     
     // Cache management
-    void cacheResponse(const QString &url, const QByteArray &data);
-    QByteArray getCachedResponse(const QString &url) const;
+    void cacheResponse(const QString& url, const QByteArray& data);
+    QByteArray getCachedResponse(const QString& url) const;
     void cleanExpiredCache();
 
 private:
     // Network components
-    QNetworkAccessManager *m_networkManager;
-    QTimer *m_refreshTimer;
-    QTimer *m_timeoutTimer;
-    QTimer *m_rateLimitTimer;
-    QTimer *m_queueTimer;
-    
+    QNetworkAccessManager* m_networkManager;
+    QTimer* m_refreshTimer;
+    QTimer* m_timeoutTimer;
+    QTimer* m_rateLimitTimer;
+    QTimer* m_queueTimer;
+
     // Configuration
     QString m_apiKey;
     QString m_userAgent;
@@ -166,7 +168,7 @@ private:
     // Request management
     QQueue<ApiRequest> m_requestQueue;
     QVector<ApiRequest> m_activeRequests;
-    QMutex m_requestMutex;
+    mutable QMutex m_requestMutex;
     
     // Status tracking
     bool m_isConnected;
@@ -199,3 +201,5 @@ private:
     static const int DEFAULT_MAX_CACHE_SIZE;
     static const int DEFAULT_MAX_CALLS_PER_MINUTE;
 };
+
+Q_DECLARE_METATYPE(EarthquakeApiClient)

@@ -2,7 +2,7 @@
 
 This project is an Earthquakes Alert System that monitors earthquake data from the USGS (United States Geological Survey) and sends email alerts for significant earthquakes based on user-defined criteria.
 
-## Core Features Implemented
+## Core Features
 
 ### Data Management
 

@@ -23,6 +23,11 @@
         "condition_variable": "cpp",
         "shared_mutex": "cpp",
         "stacktrace": "cpp",
-        "thread": "cpp"
+        "thread": "cpp",
+        "qnetworkrequest": "cpp",
+        "qnetworkreply": "cpp",
+        "qstring": "cpp",
+        "qdebug": "cpp",
+        "qtooltip": "cpp"
     }
 }

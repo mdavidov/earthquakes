@@ -1,9 +1,20 @@
-#include "EarthquakeApiClient.hpp"
+#include "earthquake_api_client.hpp"
+#include "earthquake_api_client.moc"
+#include "geojson_parser.hpp"
+
+#include <chrono>
+#include <future>
+#include <string>
+#include <thread>
 #include <QtCore/QJsonParseError>
 #include <QtCore/QUrlQuery>
 #include <QtCore/QStandardPaths>
 #include <QtCore/QCoreApplication>
 #include <QtNetwork/QSslSocket>
+#include <QFile>
+#include <QByteArray>
+#include <QTimer>
+using std::chrono::milliseconds;
 
 // Constants
 const int EarthquakeApiClient::DEFAULT_TIMEOUT_MS = 30000;
@@ -35,7 +46,10 @@ EarthquakeApiClient::EarthquakeApiClient(QObject *parent)
     , m_callsThisMinute(0)
     , m_maxCallsPerMinute(DEFAULT_MAX_CALLS_PER_MINUTE)
 {
+    qRegisterMetaType<EarthquakeApiClient>("EarthquakeApiClient");
+
     // Initialize network manager
+    //     void sslErrors(QNetworkReply* reply, const QList<QSslError>& errors);
     m_networkManager = new QNetworkAccessManager(this);
     connect(m_networkManager, &QNetworkAccessManager::finished,
             this, &EarthquakeApiClient::onNetworkReplyFinished);
@@ -328,10 +342,14 @@ void EarthquakeApiClient::executeRequest(const ApiRequest &request)
 {
     if (isRateLimited()) {
         // Re-queue the request to be processed later
-        QTimer::singleShot(m_rateLimitDelayMs, [this, request]() {
+        // QTimer::singleShot(milliseconds(m_rateLimitDelayMs), Qt::PreciseTimer, [this, request]() {
+        //     enqueueRequest(request);
+        // });
+        const auto ftr = std::async(std::launch::async, [this, request]() {
+            std::this_thread::sleep_for(milliseconds(m_rateLimitDelayMs));
             enqueueRequest(request);
         });
-        emit rateLimitReached(m_rateLimitDelayMs);
+        (void)ftr;
         return;
     }
     
@@ -514,12 +532,11 @@ void EarthquakeApiClient::onNetworkReplyFinished()
     reply->deleteLater();
 }
 
-void EarthquakeApiClient::onSslErrors(const QList<QSslError> &errors)
+void EarthquakeApiClient::onSslErrors(QNetworkReply* reply, const QList<QSslError>& errors)
 {
-    QNetworkReply *reply = qobject_cast<QNetworkReply*>(sender());
     if (!reply) return;
     
-    // Log SSL errors but continue (for development - in production, handle more carefully)
+    // Log SSL errors but continue (for development; in production, handle more carefully)
     for (const QSslError &error : errors) {
         qDebug() << "SSL Error:" << error.errorString();
     }
@@ -646,10 +663,15 @@ void EarthquakeApiClient::retryRequest(const ApiRequest &request)
     // Add exponential backoff delay
     int delay = m_rateLimitDelayMs * (1 << retryRequest.retryCount); // 2^retry * base delay
     delay = qMin(delay, 30000); // Maximum 30 second delay
-    
-    QTimer::singleShot(delay, [this, retryRequest]() {
-        enqueueRequest(retryRequest);
+
+    // QTimer::singleShot(milliseconds(delay), Qt::PreciseTimer, [this, retryRequest]() {
+    //     enqueueRequest(retryRequest);
+    // });
+    const auto ftr = std::async(std::launch::async, [this, delay, request]() {
+        std::this_thread::sleep_for(milliseconds(delay));
+        enqueueRequest(request);
     });
+    (void)ftr;
 }
 
 void EarthquakeApiClient::handleRequestError(const ApiRequest &request, const QString &error)
@@ -676,7 +698,9 @@ QVector<EarthquakeData> EarthquakeApiClient::parseUsgsGeoJson(const QByteArray &
     QJsonDocument doc = QJsonDocument::fromJson(data, &parseError);
     
     if (parseError.error != QJsonParseError::NoError) {
-        throw std::runtime_error(QString("JSON parse error: %1").arg(parseError.errorString()).toStdString());
+        // throw std::runtime_error(QString("JSON parse error: %1").arg(parseError.errorString()).toStdString());
+        qDebug() << "JSON parse error:" << parseError.errorString();
+        throw std::runtime_error("JSON parse error");
     }
     
     QJsonObject root = doc.object();
@@ -705,9 +729,11 @@ QVector<EarthquakeData> EarthquakeApiClient::parseEmscData(const QByteArray &dat
     QJsonDocument doc = QJsonDocument::fromJson(data, &parseError);
     
     if (parseError.error != QJsonParseError::NoError) {
-        throw std::runtime_error(QString("EMSC JSON parse error: %1").arg(parseError.errorString()).toStdString());
+        // throw std::runtime_error(QString("EMSC JSON parse error: %1").arg(parseError.errorString()).toStdString());
+        qDebug() << "EMSC JSON parse error:" << parseError.errorString();
+        throw std::runtime_error("EMSC JSON parse error");
     }
-    
+
     QJsonObject root = doc.object();
     QJsonArray events = root["events"].toArray();
     
@@ -721,7 +747,7 @@ QVector<EarthquakeData> EarthquakeApiClient::parseEmscData(const QByteArray &dat
         eq.magnitude = event["mag"].toDouble();
         eq.depth = event["depth"].toDouble();
         eq.timestamp = QDateTime::fromString(event["time"].toString(), Qt::ISODate);
-        eq.location = event["region"].toString();
+        eq.location =  GeoJsonParser::parseCoordinate(event["region"].toString());
         eq.dataSource = "EMSC";
         eq.uncertainty = event["maguncertainty"].toDouble();
         eq.reviewStatus = event["evaluationmode"].toString();
@@ -750,7 +776,9 @@ QVector<EarthquakeData> EarthquakeApiClient::parseJmaData(const QByteArray &data
     QJsonDocument doc = QJsonDocument::fromJson(data, &parseError);
     
     if (parseError.error != QJsonParseError::NoError) {
-        throw std::runtime_error(QString("JMA JSON parse error: %1").arg(parseError.errorString()).toStdString());
+        // throw std::runtime_error(QString("JMA JSON parse error: %1").arg(parseError.errorString()).toStdString());
+        qDebug() << "JMA JSON parse error:" << parseError.errorString();
+        throw std::runtime_error("JMA JSON parse error");
     }
     
     // JMA-specific parsing logic would go here
@@ -775,7 +803,7 @@ EarthquakeData EarthquakeApiClient::parseUsgsFeature(const QJsonObject &feature,
     eq.latitude = coordinates[1].toDouble();
     eq.depth = coordinates.size() > 2 ? coordinates[2].toDouble() : 0.0;
     eq.magnitude = properties["mag"].toDouble();
-    eq.location = properties["place"].toString();
+    eq.location = GeoJsonParser::parseCoordinate(properties["place"].toString());
     eq.eventId = properties["ids"].toString().split(",").first(); // Take first ID
     eq.dataSource = source;
     
@@ -889,7 +917,7 @@ bool EarthquakeApiClient::validateEarthquakeData(const EarthquakeData &earthquak
            isValidMagnitude(earthquake.magnitude) &&
            isValidDepth(earthquake.depth) &&
            earthquake.timestamp.isValid() &&
-           !earthquake.location.isEmpty() &&
+           earthquake.location.isValid() &&
            !earthquake.eventId.isEmpty();
 }
 

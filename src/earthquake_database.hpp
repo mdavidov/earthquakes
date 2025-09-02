@@ -6,7 +6,7 @@
 #include <QGeoCoordinate>
 #include <QGeoRectangle>
 #include <vector>
-#include "earthquake_data.h"
+#include "earthquake_data.hpp"
 
 
 class EarthquakeDatabase {
@@ -32,7 +32,7 @@ public:
         const QDateTime& since = QDateTime()
     );
     
-    bool earthquakeExists(const QString& id);
+    bool earthquakeExists(const QString& eventId);
     int getEarthquakeCount();
     void cleanOldRecords(int daysToKeep = 30);
     

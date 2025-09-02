@@ -1,6 +1,8 @@
-// EarthquakeMainWindow.cpp
-#include "EarthquakeMainWindow.h"
-#include "SpatialUtils.h"
+#include "earthquake_main_window.hpp"
+#include "geojson_parser.hpp"
+#include "spatial_utils.hpp"
+
+#include <ranges>
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QMessageBox>
 #include <QtWidgets/QFileDialog>
@@ -13,6 +15,10 @@
 #include <QtCore/QJsonArray>
 #include <QtCore/QTextStream>
 #include <QtCore/QDebug>
+#include <QByteArray>
+#include <QTimer>
+#include <QUrlQuery>
+
 
 EarthquakeMainWindow::EarthquakeMainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -29,6 +35,7 @@ EarthquakeMainWindow::EarthquakeMainWindow(QWidget *parent)
     , m_alertThreshold(5.0)
     , m_startMinimized(false)
 {
+    qRegisterMetaType<EarthquakeMainWindow>("EarthquakeMainWindow");
     setupUI();
     setupMenuBar();
     setupToolBar();
@@ -84,7 +91,7 @@ void EarthquakeMainWindow::setupUI()
     
     // Set splitter proportions (map takes 70%, controls take 30%)
     m_mainSplitter->setSizes({700, 300});
-    
+
     setupControlPanels();
     setupEarthquakeList();
     setupDetailsPane();
@@ -447,7 +454,6 @@ void EarthquakeMainWindow::onDataReceived()
     
     if (reply->error() == QNetworkReply::NoError) {
         QByteArray data = reply->readAll();
-        
         try {
             QJsonDocument doc = QJsonDocument::fromJson(data);
             QJsonObject root = doc.object();
@@ -466,7 +472,7 @@ void EarthquakeMainWindow::onDataReceived()
                     eq.latitude = coordinates[1].toDouble();
                     eq.depth = coordinates.size() > 2 ? coordinates[2].toDouble() : 0.0;
                     eq.magnitude = properties["mag"].toDouble();
-                    eq.location = properties["place"].toString();
+                    eq.location = GeoJsonParser::parseCoordinate(properties["place"].toString());
                     eq.timestamp = QDateTime::fromMSecsSinceEpoch(properties["time"].toVariant().toLongLong());
                     
                     // Calculate alert level based on magnitude
@@ -493,21 +499,21 @@ void EarthquakeMainWindow::onDataReceived()
         }
         
     } else {
-        onNetworkError();
+        onNetworkError(reply->error());
     }
     
     reply->deleteLater();
     m_currentReply = nullptr;
 }
 
-void EarthquakeMainWindow::onNetworkError()
+void EarthquakeMainWindow::onNetworkError(int error)
 {
     statusBar()->showMessage("Failed to fetch earthquake data", 5000);
-    
+    qDebug() << "Network ERROR occurred:" << error;
     if (m_trayIcon) {
         m_trayIcon->showMessage("Earthquake Alert System", 
-                               "Failed to fetch earthquake data. Check your internet connection.",
-                               QSystemTrayIcon::Warning, 5000);
+                                "Failed to fetch earthquake data. Check your internet connection.",
+                                QSystemTrayIcon::Warning, 5000);
     }
 }
 
@@ -542,10 +548,11 @@ void EarthquakeMainWindow::exportData()
                 << eq.longitude << ","
                 << eq.magnitude << ","
                 << eq.depth << ","
-                << "\"" << eq.location << "\","
+                << "\"" << GeoJsonParser::coordinateToString(eq.location) << "\","
                 << eq.alertLevel << "\n";
         }
-    } else {
+    }
+    else {
         // Export as JSON
         QJsonArray earthquakesArray;
         for (const auto &eq : m_filteredEarthquakes) {
@@ -555,7 +562,7 @@ void EarthquakeMainWindow::exportData()
             eqObj["longitude"] = eq.longitude;
             eqObj["magnitude"] = eq.magnitude;
             eqObj["depth"] = eq.depth;
-            eqObj["location"] = eq.location;
+            eqObj["location"] = GeoJsonParser::coordinateToString(eq.location);
             eqObj["alertLevel"] = eq.alertLevel;
             earthquakesArray.append(eqObj);
         }
@@ -593,7 +600,7 @@ void EarthquakeMainWindow::importData()
 
 void EarthquakeMainWindow::onMapCenterChanged()
 {
-    m_mapWidget->setMapCenter(m_latSpinBox->value(), m_lonSpinBox->value());
+    m_mapWidget->setCenter(m_latSpinBox->value(), m_lonSpinBox->value());
 }
 
 void EarthquakeMainWindow::onZoomChanged(int value)
@@ -612,7 +619,7 @@ void EarthquakeMainWindow::resetMapView()
     m_latSpinBox->setValue(0.0);
     m_lonSpinBox->setValue(0.0);
     m_zoomSlider->setValue(100);
-    m_mapWidget->setMapCenter(0.0, 0.0);
+    m_mapWidget->setCenter(0.0, 0.0);
     m_mapWidget->setZoomLevel(1.0);
 }
 
@@ -646,7 +653,7 @@ void EarthquakeMainWindow::onEarthquakeSelected()
             "Estimated Effects:\n"
             "Seismic Energy: %.2e J\n"
             "Mercalli Intensity: %8\n"
-        ).arg(eq.location)
+        ).arg(GeoJsonParser::coordinateToString(eq.location))
          .arg(formatMagnitude(eq.magnitude))
          .arg(formatDepth(eq.depth))
          .arg(eq.timestamp.toString("yyyy-MM-dd hh:mm:ss UTC"))
@@ -659,7 +666,7 @@ void EarthquakeMainWindow::onEarthquakeSelected()
         m_detailsPane->setPlainText(details);
         
         // Center map on selected earthquake
-        m_mapWidget->setMapCenter(eq.latitude, eq.longitude);
+        m_mapWidget->setCenter(eq.latitude, eq.longitude);
         
         // Update spinboxes without triggering signals
         m_latSpinBox->blockSignals(true);
@@ -698,16 +705,16 @@ void EarthquakeMainWindow::checkForAlerts()
     }
 }
 
-void EarthquakeMainWindow::showAlert(const EarthquakeData &earthquake)
+void EarthquakeMainWindow::showAlert(const EarthquakeData& earthquake)
 {
     QString alertText = QString("EARTHQUAKE ALERT\nM%1 - %2\n%3")
                        .arg(formatMagnitude(earthquake.magnitude))
-                       .arg(earthquake.location)
+                       .arg(GeoJsonParser::coordinateToString(earthquake.location))
                        .arg(earthquake.timestamp.toString("hh:mm:ss"));
     
     // Add to alerts list
     auto *item = new QListWidgetItem(alertText);
-    item->setBackground(getAlertLevelColor(earthquake.alertLevel));
+    item->setBackground(m_mapWidget->getAlertLevelColor(earthquake.alertLevel));
     m_alertsList->insertItem(0, item);
     
     // Keep only last 50 alerts
@@ -903,13 +910,13 @@ void EarthquakeMainWindow::updateEarthquakeList()
         m_earthquakeTable->setItem(i, 0, timeItem);
         
         // Location
-        auto *locationItem = new QTableWidgetItem(eq.location);
+        auto* locationItem = new QTableWidgetItem(GeoJsonParser::coordinateToString(eq.location));
         m_earthquakeTable->setItem(i, 1, locationItem);
         
         // Magnitude
         auto *magnitudeItem = new QTableWidgetItem(formatMagnitude(eq.magnitude));
         magnitudeItem->setData(Qt::UserRole, eq.magnitude);
-        magnitudeItem->setBackground(getMagnitudeColor(eq.magnitude));
+        magnitudeItem->setBackground(m_mapWidget->getMagnitudeColor(eq.magnitude));
         m_earthquakeTable->setItem(i, 2, magnitudeItem);
         
         // Depth
@@ -920,7 +927,7 @@ void EarthquakeMainWindow::updateEarthquakeList()
         // Alert Level
         auto *alertItem = new QTableWidgetItem(getAlertLevelText(eq.alertLevel));
         alertItem->setData(Qt::UserRole, eq.alertLevel);
-        alertItem->setBackground(getAlertLevelColor(eq.alertLevel));
+        alertItem->setBackground(m_mapWidget->getAlertLevelColor(eq.alertLevel));
         m_earthquakeTable->setItem(i, 4, alertItem);
         
         // Distance (from map center)
@@ -970,6 +977,23 @@ void EarthquakeMainWindow::updateStatusBar()
                            .arg(m_allEarthquakes.size()));
 }
 
+void EarthquakeMainWindow::addEarthquake(const EarthquakeData& earthquake)
+{
+    m_allEarthquakes.append(earthquake);
+    updateEarthquakeList();
+    updateStatusBar();
+}
+
+void EarthquakeMainWindow::updateDataTimestamp()
+{
+    for (auto i : std::views::iota(0, m_earthquakeTable->rowCount())) {
+        QTableWidgetItem* item = m_earthquakeTable->item(i, 0);
+        if (item) {
+            item->setText(m_filteredEarthquakes[i].timestamp.toString("MM/dd hh:mm"));
+        }
+    }
+}
+
 void EarthquakeMainWindow::applyFilters()
 {
     m_filteredEarthquakes.clear();
@@ -982,10 +1006,10 @@ void EarthquakeMainWindow::applyFilters()
     
     // Update map with filtered data
     m_mapWidget->clearEarthquakes();
-    for (const auto &eq : m_filteredEarthquakes) {
+    for (const auto& eq : m_filteredEarthquakes) {
         m_mapWidget->addEarthquake(eq);
     }
-    
+
     updateEarthquakeList();
     updateStatusBar();
 }
@@ -1067,27 +1091,27 @@ void EarthquakeMainWindow::playAlertSound(int alertLevel)
     }
 }
 
-QColor EarthquakeMainWindow::getMagnitudeColor(double magnitude) const
-{
-    if (magnitude < 3.0) return QColor(100, 255, 100);      // Light green
-    else if (magnitude < 4.0) return QColor(255, 255, 100); // Yellow
-    else if (magnitude < 5.0) return QColor(255, 180, 100); // Orange
-    else if (magnitude < 6.0) return QColor(255, 100, 100); // Light red
-    else if (magnitude < 7.0) return QColor(200, 50, 50);   // Red
-    else return QColor(150, 0, 150);                        // Purple
-}
-
-QColor EarthquakeMainWindow::getAlertLevelColor(int alertLevel) const
-{
-    switch (alertLevel) {
-        case 0: return QColor(100, 150, 255); // Blue - Info
-        case 1: return QColor(100, 255, 100); // Green - Minor
-        case 2: return QColor(255, 255, 100); // Yellow - Moderate
-        case 3: return QColor(255, 150, 50);  // Orange - Major
-        case 4: return QColor(255, 50, 50);   // Red - Critical
-        default: return QColor(128, 128, 128); // Gray - Unknown
-    }
-}
+// QColor EarthquakeMainWindow::getMagnitudeColor(double magnitude) const
+// {
+//     if (magnitude < 3.0) return QColor(100, 255, 100);      // Light green
+//     else if (magnitude < 4.0) return QColor(255, 255, 100); // Yellow
+//     else if (magnitude < 5.0) return QColor(255, 180, 100); // Orange
+//     else if (magnitude < 6.0) return QColor(255, 100, 100); // Light red
+//     else if (magnitude < 7.0) return QColor(200, 50, 50);   // Red
+//     else return QColor(150, 0, 150);                        // Purple
+// }
+//
+// QColor EarthquakeMainWindow::getAlertLevelColor(int alertLevel) const
+// {
+//     switch (alertLevel) {
+//         case 0: return QColor(100, 150, 255); // Blue - Info
+//         case 1: return QColor(100, 255, 100); // Green - Minor
+//         case 2: return QColor(255, 255, 100); // Yellow - Moderate
+//         case 3: return QColor(255, 150, 50);  // Orange - Major
+//         case 4: return QColor(255, 50, 50);   // Red - Critical
+//         default: return QColor(128, 128, 128); // Gray - Unknown
+//     }
+// }
 
 void EarthquakeMainWindow::closeEvent(QCloseEvent *event)
 {

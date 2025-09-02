@@ -1,5 +1,8 @@
 // EarthquakeMainWindow.h
 #pragma once
+
+#include "earthquake_map_widget.hpp"
+
 #include <QtWidgets/QMainWindow>
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QHBoxLayout>
@@ -31,25 +34,25 @@
 #include <QtWidgets/QSystemTrayIcon>
 #include <QtMultimedia/QSoundEffect>
 
-#include "EarthquakeMapWidget.hpp"
-
 
 class EarthquakeMainWindow : public QMainWindow
 {
     Q_OBJECT
-
 public:
-    explicit EarthquakeMainWindow(QWidget *parent = nullptr);
+    explicit EarthquakeMainWindow(QWidget* parent = nullptr);
     ~EarthquakeMainWindow();
 
-protected:
-    void closeEvent(QCloseEvent *event) override;
+    void addEarthquake(const EarthquakeData& earthquake);
+    void updateDataTimestamp();
 
-private slots:
+protected:
+    void closeEvent(QCloseEvent* event) override;
+
+public slots:
     // Data management
     void fetchEarthquakeData();
     void onDataReceived();
-    void onNetworkError();
+    void onNetworkError(int error);
     void refreshData();
     void exportData();
     void importData();
@@ -90,7 +93,10 @@ private:
     void setupDockWidgets();
     void setupSystemTray();
     void connectSignals();
-    
+    void setupControlPanels();
+    void setupEarthquakeList();
+    void setupDetailsPane();
+
     void updateEarthquakeList();
     void updateStatistics();
     void updateStatusBar();
@@ -105,64 +111,64 @@ private:
     void playAlertSound(int alertLevel);
     
     // UI Components
-    EarthquakeMapWidget *m_mapWidget;
-    QSplitter *m_mainSplitter;
-    QSplitter *m_rightSplitter;
-    
+    EarthquakeMapWidget* m_mapWidget;
+    QSplitter* m_mainSplitter;
+    QSplitter* m_rightSplitter;
+
     // Earthquake list and details
-    QTableWidget *m_earthquakeTable;
-    QTextEdit *m_detailsPane;
-    QListWidget *m_alertsList;
-    
+    QTableWidget* m_earthquakeTable;
+    QTextEdit* m_detailsPane;
+    QListWidget* m_alertsList;
+
     // Control panels
-    QGroupBox *m_mapControlsGroup;
-    QGroupBox *m_filterGroup;
-    QGroupBox *m_alertGroup;
+    QGroupBox* m_mapControlsGroup;
+    QGroupBox* m_filterGroup;
+    QGroupBox* m_alertGroup;
     
     // Map controls
-    QDoubleSpinBox *m_latSpinBox;
-    QDoubleSpinBox *m_lonSpinBox;
-    QSlider *m_zoomSlider;
-    QCheckBox *m_showGridCheckBox;
-    QCheckBox *m_showLegendCheckBox;
-    QPushButton *m_resetViewBtn;
-    QPushButton *m_fullscreenBtn;
-    
+    QDoubleSpinBox* m_latSpinBox;
+    QDoubleSpinBox* m_lonSpinBox;
+    QSlider* m_zoomSlider;
+    QCheckBox* m_showGridCheckBox;
+    QCheckBox* m_showLegendCheckBox;
+    QPushButton* m_resetViewBtn;
+    QPushButton* m_fullscreenBtn;
+
     // Filters
-    QDoubleSpinBox *m_minMagnitudeSpinBox;
-    QDoubleSpinBox *m_maxMagnitudeSpinBox;
-    QSpinBox *m_maxAgeHoursSpinBox;
-    QComboBox *m_alertLevelCombo;
-    QCheckBox *m_recentOnlyCheckBox;
-    
+    QDoubleSpinBox* m_minMagnitudeSpinBox;
+    QDoubleSpinBox* m_maxMagnitudeSpinBox;
+    QSpinBox* m_maxAgeHoursSpinBox;
+    QComboBox* m_alertLevelCombo;
+    QCheckBox* m_recentOnlyCheckBox;
+
     // Alert settings
-    QCheckBox *m_alertsEnabledCheckBox;
-    QCheckBox *m_soundEnabledCheckBox;
-    QComboBox *m_alertThresholdCombo;
-    QProgressBar *m_alertIndicator;
+    QCheckBox* m_alertsEnabledCheckBox;
+    QCheckBox* m_soundEnabledCheckBox;
+    QComboBox* m_alertThresholdCombo;
+    QProgressBar* m_alertIndicator;
     
     // Statistics display
-    QLabel *m_totalEarthquakesLabel;
-    QLabel *m_recentEarthquakesLabel;
-    QLabel *m_highestMagnitudeLabel;
-    QLabel *m_lastUpdateLabel;
-    
+    QLabel* m_totalEarthquakesLabel;
+    QLabel* m_recentEarthquakesLabel;
+    QLabel* m_highestMagnitudeLabel;
+    QLabel* m_lastUpdateLabel;
+
     // Network and data
-    QNetworkAccessManager *m_networkManager;
-    QNetworkReply *m_currentReply;
-    QTimer *m_refreshTimer;
-    QTimer *m_alertTimer;
-    
+    QNetworkAccessManager* m_networkManager;
+    QNetworkReply* m_currentReply;
+    QTimer* m_refreshTimer;
+    QTimer* m_alertTimer;
+
     // System tray and notifications
-    QSystemTrayIcon *m_trayIcon;
-    QSoundEffect *m_alertSound;
-    
+    QSystemTrayIcon* m_trayIcon;
+    QSoundEffect* m_alertSound;
+
     // Data storage
     QVector<EarthquakeData> m_allEarthquakes;
     QVector<EarthquakeData> m_filteredEarthquakes;
     
     // Settings
-    QSettings *m_settings;
+    QSettings* m_settings;
     QString m_dataSourceUrl;
     int m_refreshIntervalMinutes;
     bool m_alertsEnabled;
@@ -170,3 +176,5 @@ private:
     double m_alertThreshold;
     bool m_startMinimized;
 };
+
+Q_DECLARE_METATYPE(EarthquakeMainWindow)

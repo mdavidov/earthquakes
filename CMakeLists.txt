@@ -24,11 +24,13 @@ endif()
 
 find_package(Qt6 REQUIRED COMPONENTS
     Core
-    Widgets
+    Multimedia
     Network
-    Sql
-    # Location
     Positioning
+    Sql
+    Svg
+    Test
+    Widgets
 )
 
 add_executable(EarthquakeAlertSystem
@@ -46,9 +48,24 @@ add_executable(EarthquakeAlertSystem
 
 target_link_libraries(EarthquakeAlertSystem
     Qt6::Core
-    Qt6::Widgets
+    Qt6::Multimedia
     Qt6::Network
+    Qt6::Positioning
     Qt6::Sql
-    # Qt6::Location
+    Qt6::Svg
+    Qt6::Widgets
+)
+
+target_include_directories(EarthquakeAlertSystem SYSTEM PRIVATE
+    "/Applications/Xcode.app/Contents/Developer:/opt/Qt/6.9.1/macos")
+
+add_executable(testgeocoordinate
+    src/earthquake_data.cpp
+    src/geojson_parser.cpp
+    src/testgeocoordinateparsing.cpp
+)
+target_link_libraries(testgeocoordinate PRIVATE
+    Qt6::Core
+    Qt6::Test
     Qt6::Positioning
 )

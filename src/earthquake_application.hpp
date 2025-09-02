@@ -1,4 +1,14 @@
 #pragma once
+
+#include "earthquake_api_client.hpp"
+#include "earthquake_main_window.hpp"
+#include "earthquake_map_widget.hpp"
+#include "notification_manager.hpp"
+#include "spatial_utils.hpp"
+
+#include <chrono>
+#include <future>
+#include <thread>
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QMessageBox>
 #include <QtWidgets/QSplashScreen>
@@ -16,12 +26,10 @@
 #include <QtGui/QPixmap>
 #include <QtGui/QPainter>
 #include <QtNetwork/QSslSocket>
+#include <QtNetwork/QNetworkAccessManager>
+#include <QStorageInfo>
+using std::chrono::milliseconds;
 
-#include "earthquake_api_client.hpp"
-#include "earthquake_main_window.hpp"
-#include "earthquake_map_widget.hpp"
-#include "notification_manager.hpp"
-#include "spatial_utils.hpp"
 
 // Application information
 #define APP_NAME "Earthquake Alert System"
@@ -31,36 +39,18 @@
 #define APP_DESCRIPTION "Real-time earthquake monitoring and alert application"
 
 // Logging categories
-Q_LOGGING_CATEGORY(main, "earthquake.main")
-Q_LOGGING_CATEGORY(network, "earthquake.network")
-Q_LOGGING_CATEGORY(notifications, "earthquake.notifications")
-Q_LOGGING_CATEGORY(spatial, "earthquake.spatial")
+// Q_LOGGING_CATEGORY(main_, "earthquake.main")
+// Q_LOGGING_CATEGORY(network, "earthquake.network")
+// Q_LOGGING_CATEGORY(notifications, "earthquake.notifications")
+// Q_LOGGING_CATEGORY(spatial, "earthquake.spatial")
 
 class EarthquakeApplication : public QApplication
 {
     Q_OBJECT
-
 public:
-    EarthquakeApplication(int &argc, char **argv)
-        : QApplication(argc, argv)
-        , m_mainWindow(nullptr)
-        , m_apiClient(nullptr)
-        , m_notificationManager(nullptr)
-        , m_splashScreen(nullptr)
-        , m_initializationComplete(false)
-    {
-        setupApplication();
-        parseCommandLine();
-        setupLogging();
-        setupApplicationPaths();
-        checkSystemRequirements();
-        setupSplashScreen();
-        initializeComponents();
-        connectSignals();
-    }
+    EarthquakeApplication(int argc, char* argv[]);
 
-    ~EarthquakeApplication()
-    {
+    ~EarthquakeApplication() {
         cleanup();
     }
 
@@ -120,11 +110,18 @@ public:
             
             // Hide splash screen
             if (m_splashScreen) {
-                QTimer::singleShot(1000, [this]() {
+                // QTimer::singleShot(milliseconds(1000), Qt::PreciseTimer, [this]() {
+                //     m_splashScreen->finish(m_mainWindow);
+                //     m_splashScreen->deleteLater();
+                //     m_splashScreen = nullptr;
+                // });
+                const auto ftr = std::async(std::launch::async, [this]() {
+                    std::this_thread::sleep_for(milliseconds(1000));
                     m_splashScreen->finish(m_mainWindow);
                     m_splashScreen->deleteLater();
                     m_splashScreen = nullptr;
                 });
+                (void)ftr;
             }
 
             // Show main window unless started minimized
@@ -134,9 +131,13 @@ public:
                 m_mainWindow->activateWindow();
             }
 
+            if (!createLockFile()) {
+                return false;
+            }
+
             return true;
-            
-        } catch (const std::exception &e) {
+        }
+        catch (const std::exception &e) {
             handleInitializationError(e.what());
             return false;
         }
@@ -145,7 +146,7 @@ public:
 private slots:
     void onEarthquakeDataReceived(const QVector<EarthquakeData> &earthquakes, ApiRequestType requestType)
     {
-        qCInfo(main) << "Received" << earthquakes.size() << "earthquakes, type:" << static_cast<int>(requestType);
+        qDebug() << "Received" << earthquakes.size() << "earthquakes, type:" << static_cast<int>(requestType);
         
         // Forward to main window
         if (m_mainWindow) {
@@ -168,9 +169,9 @@ private slots:
         }
     }
     
-    void onApiError(const QString &error, ApiRequestType requestType)
+    void onApiError(const QString& error, ApiRequestType requestType)
     {
-        qCWarning(network) << "API Error:" << error << "Type:" << static_cast<int>(requestType);
+        qDebug() << "API Error:" << error << "Type:" << static_cast<int>(requestType);
         
         if (m_notificationManager) {
             m_notificationManager->showSystemNotification("Data Error", 
@@ -179,32 +180,33 @@ private slots:
         }
         
         if (m_mainWindow) {
-            m_mainWindow->showNetworkError(error);
+            m_mainWindow->onNetworkError(QNetworkReply::UnknownServerError);
         }
     }
     
     void onNetworkStatusChanged(bool connected)
     {
-        qCInfo(network) << "Network status changed:" << (connected ? "Connected" : "Disconnected");
+        qDebug() << "Network status changed:" << (connected ? "Connected" : "Disconnected");
         
         if (m_notificationManager) {
             m_notificationManager->showNetworkStatusNotification(connected);
         }
-        
-        if (m_mainWindow) {
-            m_mainWindow->updateNetworkStatus(connected);
-        }
+
+        // TODO
+        // if (m_mainWindow) {
+        //     m_mainWindow->updateNetworkStatus(connected);
+        // }
     }
     
     void onNotificationTriggered(const QString &ruleName, const EarthquakeData &earthquake)
     {
-        qCInfo(notifications) << "Alert rule triggered:" << ruleName 
-                             << "for M" << earthquake.magnitude << earthquake.location;
+        qDebug() << "Alert rule triggered:" << ruleName 
+                 << "for M" << earthquake.magnitude << earthquake.location;
         
         // Log significant alerts
         if (earthquake.magnitude >= 7.0) {
-            qCCritical(main) << "MAJOR EARTHQUAKE ALERT: M" << earthquake.magnitude 
-                            << earthquake.location << "at" << earthquake.timestamp.toString();
+            qDebug() << "MAJOR EARTHQUAKE ALERT: M" << earthquake.magnitude 
+                         << earthquake.location << "at" << earthquake.timestamp.toString();
         }
     }
 
@@ -263,7 +265,7 @@ private:
         QCommandLineOption configOption({"config", "c"}, "Use custom configuration file", "file");
         QCommandLineOption logLevelOption({"log-level", "l"}, "Set logging level (debug, info, warning, critical)", "level", "info");
         QCommandLineOption dataSourceOption({"data-source", "s"}, "Override default data source", "source");
-        QCommandLineOption locationOption({"location"}, "Set user location (lat,lon)", "coordinates");
+        QCommandLineOption locationOption({"location", "l"}, "Set user location (lat,lon)", "coordinates");
 
         parser.addOption(noSplashOption);
         parser.addOption(minimizedOption);
@@ -327,8 +329,8 @@ private:
         
         qSetMessagePattern("[%{time yyyy-MM-dd hh:mm:ss.zzz}] [%{category}] [%{type}] %{message}");
         
-        qCInfo(main) << "Application starting..." << APP_NAME << APP_VERSION;
-        qCInfo(main) << "Log file:" << logFile;
+        qDebug() << "Application starting..." << APP_NAME << APP_VERSION;
+        qDebug() << "Log file:" << logFile;
     }
 
     void setupApplicationPaths()
@@ -340,28 +342,28 @@ private:
         for (const QString &subdir : subdirs) {
             QString path = appDataPath + "/" + subdir;
             if (!QDir().mkpath(path)) {
-                qCWarning(main) << "Failed to create directory:" << path;
+                qDebug() << "Failed to create directory:" << path;
             }
         }
         
-        qCInfo(main) << "Application data path:" << appDataPath;
+        qDebug() << "Application data path:" << appDataPath;
     }
 
     void checkSystemRequirements()
     {
         // Check Qt version
-        qCInfo(main) << "Qt version:" << qVersion();
+        qDebug() << "Qt version:" << qVersion();
         
         // Check SSL support
         if (!QSslSocket::supportsSsl()) {
-            qCWarning(main) << "SSL not supported - HTTPS connections may fail";
+            qDebug() << "SSL not supported - HTTPS connections may fail";
         } else {
-            qCInfo(main) << "SSL version:" << QSslSocket::sslLibraryVersionString();
+            qDebug() << "SSL version:" << QSslSocket::sslLibraryVersionString();
         }
         
         // Check system tray availability
         if (!QSystemTrayIcon::isSystemTrayAvailable()) {
-            qCWarning(main) << "System tray not available - notifications will be limited";
+            qDebug() << "System tray not available - notifications will be limited";
             
             if (!m_commandLineArgs.noSplash) {
                 QMessageBox::warning(nullptr, APP_NAME,
@@ -389,10 +391,10 @@ private:
         bool networkAvailable = (reply->error() == QNetworkReply::NoError);
         reply->deleteLater();
         
-        qCInfo(main) << "Network connectivity:" << (networkAvailable ? "Available" : "Limited");
+        qDebug() << "Network connectivity:" << (networkAvailable ? "Available" : "Limited");
         
         if (!networkAvailable && !m_commandLineArgs.offlineMode) {
-            qCWarning(main) << "Network connectivity issues detected";
+            qDebug() << "Network connectivity issues detected";
         }
     }
 
@@ -453,7 +455,7 @@ private:
 
     void initializeComponents()
     {
-        qCInfo(main) << "Initializing application components...";
+        qDebug() << "Initializing application components...";
         
         // Pre-initialize critical systems
         if (!QDir().exists(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation))) {
@@ -477,11 +479,11 @@ private:
                 m_apiClient->setCustomApiUrl(m_commandLineArgs.dataSource);
             }
             
-            qCInfo(main) << "API client initialized successfully";
+            qDebug() << "API client initialized successfully";
             return true;
             
         } catch (const std::exception &e) {
-            qCCritical(main) << "Failed to initialize API client:" << e.what();
+            qDebug() << "Failed to initialize API client:" << e.what();
             return false;
         }
     }
@@ -495,7 +497,7 @@ private:
             if (m_commandLineArgs.hasUserLocation) {
                 m_notificationManager->setUserLocation(m_commandLineArgs.userLatitude, 
                                                       m_commandLineArgs.userLongitude);
-                qCInfo(main) << "User location set:" << m_commandLineArgs.userLatitude 
+                qDebug() << "User location set:" << m_commandLineArgs.userLatitude 
                             << m_commandLineArgs.userLongitude;
             }
             
@@ -506,11 +508,11 @@ private:
                 m_notificationManager->setSettings(settings);
             }
             
-            qCInfo(main) << "Notification manager initialized successfully";
+            qDebug() << "Notification manager initialized successfully";
             return true;
             
         } catch (const std::exception &e) {
-            qCCritical(main) << "Failed to initialize notification manager:" << e.what();
+            qDebug() << "Failed to initialize notification manager:" << e.what();
             return false;
         }
     }
@@ -518,30 +520,31 @@ private:
     bool initializeMainWindow()
     {
         try {
-            m_mainWindow = new EarthquakeMainWindow;
-            
+            m_mainWindow = new EarthquakeMainWindow();
+
             // Configure main window
             m_mainWindow->setWindowTitle(QString("%1 v%2").arg(APP_NAME, APP_VERSION));
-            
+
+        // TODO
             // Apply command line settings
-            if (m_commandLineArgs.debugMode) {
-                m_mainWindow->enableDebugMode(true);
-            }
-            
-            if (m_commandLineArgs.offlineMode) {
-                m_mainWindow->setOfflineMode(true);
-            }
-            
-            // Load custom configuration if specified
-            if (!m_commandLineArgs.configFile.isEmpty()) {
-                m_mainWindow->loadConfiguration(m_commandLineArgs.configFile);
-            }
-            
-            qCInfo(main) << "Main window initialized successfully";
+            // if (m_commandLineArgs.debugMode) {
+            //     m_mainWindow->enableDebugMode(true);
+            // }
+            //
+            // if (m_commandLineArgs.offlineMode) {
+            //     m_mainWindow->setOfflineMode(true);
+            // }
+            //
+            // // Load custom configuration if specified
+            // if (!m_commandLineArgs.configFile.isEmpty()) {
+            //     m_mainWindow->loadConfiguration(m_commandLineArgs.configFile);
+            // }
+
+            qDebug() << "Main window initialized successfully";
             return true;
-            
-        } catch (const std::exception &e) {
-            qCCritical(main) << "Failed to initialize main window:" << e.what();
+        }
+        catch (const std::exception &e) {
+            qDebug() << "Failed to initialize main window:" << e.what();
             return false;
         }
     }
@@ -559,29 +562,30 @@ private:
         // Connect notification manager
         connect(m_notificationManager, &NotificationManager::alertRuleTriggered,
                 this, &EarthquakeApplication::onNotificationTriggered);
-        
+
+        // TODO
         // Connect main window to components
-        if (m_mainWindow) {
-            // Allow main window to control API client
-            connect(m_mainWindow, &EarthquakeMainWindow::refreshDataRequested,
-                    m_apiClient, QOverload<>::of(&EarthquakeApiClient::fetchAllEarthquakes));
-            connect(m_mainWindow, &EarthquakeMainWindow::customDataRequested,
-                    m_apiClient, &EarthquakeApiClient::fetchEarthquakesByRegion);
-            
-            // Allow main window to control notifications
-            connect(m_mainWindow, &EarthquakeMainWindow::notificationSettingsChanged,
-                    m_notificationManager, &NotificationManager::setSettings);
-            connect(m_mainWindow, &EarthquakeMainWindow::userLocationChanged,
-                    m_notificationManager, &NotificationManager::setUserLocation);
-        }
+        // if (m_mainWindow) {
+        //     // Allow main window to control API client
+        //     connect(m_mainWindow, &EarthquakeMainWindow::refreshDataRequested,
+        //             m_apiClient, QOverload<>::of(&EarthquakeApiClient::fetchAllEarthquakes));
+        //     connect(m_mainWindow, &EarthquakeMainWindow::customDataRequested,
+        //             m_apiClient, &EarthquakeApiClient::fetchEarthquakesByRegion);
+        //
+        //     // Allow main window to control notifications
+        //     connect(m_mainWindow, &EarthquakeMainWindow::notificationSettingsChanged,
+        //             m_notificationManager, &NotificationManager::setSettings);
+        //     connect(m_mainWindow, &EarthquakeMainWindow::userLocationChanged,
+        //             m_notificationManager, &NotificationManager::setUserLocation);
+        // }
         
-        qCInfo(main) << "Component connections established";
+        qDebug() << "Component connections established";
     }
 
     void loadInitialData()
     {
         if (m_commandLineArgs.offlineMode) {
-            qCInfo(main) << "Offline mode - skipping initial data load";
+            qDebug() << "Offline mode - skipping initial data load";
             return;
         }
         
@@ -595,7 +599,7 @@ private:
             m_apiClient->startAutoRefresh(1); // Every minute for testing
         }
         
-        qCInfo(main) << "Initial data load started";
+        qDebug() << "Initial data load started";
     }
 
     void finalizeInitialization()
@@ -610,13 +614,14 @@ private:
         }
         
         // Log successful startup
-        qCInfo(main) << "Application initialization completed successfully";
-        qCInfo(main) << "Monitoring started with auto-refresh every" << m_apiClient->getRefreshInterval() << "minutes";
+        qDebug() << "Application initialization completed successfully";
+        // TODO
+        // qDebug() << "Monitoring started with auto-refresh every" << m_apiClient->getRefreshInterval() << "minutes";
     }
 
     void handleInitializationError(const QString &error)
     {
-        qCCritical(main) << "Initialization failed:" << error;
+        qDebug() << "Initialization failed:" << error;
         
         if (m_splashScreen) {
             m_splashScreen->hide();
@@ -666,44 +671,70 @@ private:
             "QSlider::handle:horizontal { background-color: #2a82da; width: 20px; margin: -6px 0; border-radius: 10px; }"
         );
         
-        qCInfo(main) << "Dark theme applied";
+        qDebug() << "Dark theme applied";
+    }
+
+    bool createLockFile()
+    {
+        // Check for another instance already running
+        const auto lockFilePath = QStandardPaths::writableLocation(
+            QStandardPaths::TempLocation) + "/earthquake_alert_system.lock";
+        QFile lockFile(lockFilePath);
+        
+        if (lockFile.exists()) {
+            QMessageBox::information(nullptr, APP_NAME,
+                "Another instance of " APP_NAME " is already running.\n"
+                "Please close the existing instance before starting a new one.");
+            return false;
+        }
+        // Create lock file
+        if (lockFile.open(QIODevice::WriteOnly)) {
+            QTextStream stream(&lockFile);
+            stream << QCoreApplication::applicationPid() << "\n";
+            stream << QDateTime::currentDateTime().toString(Qt::ISODate) << "\n";
+            lockFile.close();
+        }
+        return false;
     }
 
     void cleanup()
     {
-        qCInfo(main) << "Application cleanup starting...";
-        
+        qDebug() << "Application cleanup starting...";
+
         // Stop all timers and network requests
         if (m_apiClient) {
             m_apiClient->stopAutoRefresh();
             m_apiClient->cancelAllRequests();
         }
-        
+
         // Save all settings
         if (m_mainWindow) {
-            m_mainWindow->saveAllSettings();
+            m_mainWindow->saveSettings();
         }
         
         if (m_notificationManager) {
             m_notificationManager->saveSettings();
         }
-        
-        qCInfo(main) << "Application cleanup completed";
+
+        lockFile.remove();
+
+        qDebug() << "Application cleanup completed";
     }
 
 private:
-    EarthquakeMainWindow *m_mainWindow;
-    EarthquakeApiClient *m_apiClient;
-    NotificationManager *m_notificationManager;
-    QSplashScreen *m_splashScreen;
+    EarthquakeMainWindow* m_mainWindow;
+    EarthquakeApiClient* m_apiClient;
+    NotificationManager* m_notificationManager;
+    QSplashScreen* m_splashScreen;
     CommandLineArgs m_commandLineArgs;
     bool m_initializationComplete;
+    QFile lockFile;
 };
 
 // Signal handler for graceful shutdown
-void signalHandler(int signal)
+inline void signalHandler(int signal)
 {
-    qCInfo(main) << "Received signal" << signal << "- initiating graceful shutdown";
+    qDebug() << "Received signal" << signal << "- initiating graceful shutdown";
     QApplication::quit();
 }
 
@@ -711,7 +742,7 @@ void signalHandler(int signal)
 
 namespace EarthquakeAppUtils {
     
-    void setupTranslations(QApplication &app)
+    inline void setupTranslations(QApplication &app)
     {
         // Setup internationalization
         QTranslator qtTranslator;
@@ -725,10 +756,10 @@ namespace EarthquakeAppUtils {
             app.installTranslator(&appTranslator);
         }
         
-        qCInfo(main) << "Translations loaded for locale:" << QLocale::system().name();
+        qDebug() << "Translations loaded for locale:" << QLocale::system().name();
     }
     
-    void checkForUpdates()
+    inline void checkForUpdates()
     {
         // Simple update check implementation
         QNetworkAccessManager manager;
@@ -739,8 +770,14 @@ namespace EarthquakeAppUtils {
         QNetworkReply *reply = manager.get(request);
         QEventLoop loop;
         QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-        
-        QTimer::singleShot(5000, &loop, &QEventLoop::quit); // 5 second timeout
+
+        // QTimer::singleShot<int>(5000, &loop, &QEventLoop::quit); // 5 second timeout
+        const auto ftr = std::async(std::launch::async, [&loop]() {
+            std::this_thread::sleep_for(milliseconds(5000));
+            loop.quit();
+        });
+        (void)ftr;
+
         loop.exec();
         
         if (reply->error() == QNetworkReply::NoError) {
@@ -750,35 +787,35 @@ namespace EarthquakeAppUtils {
             QString currentVersion = APP_VERSION;
             
             if (latestVersion != currentVersion && !latestVersion.isEmpty()) {
-                qCInfo(main) << "Update available:" << latestVersion << "(current:" << currentVersion << ")";
+                qDebug() << "Update available:" << latestVersion << "(current:" << currentVersion << ")";
                 // Could show update notification here
             } else {
-                qCInfo(main) << "Application is up to date";
+                qDebug() << "Application is up to date";
             }
         }
         
         reply->deleteLater();
     }
-    
-    void performSystemCheck()
+
+    inline void performSystemCheck()
     {
-        qCInfo(main) << "=== System Information ===";
-        qCInfo(main) << "OS:" << QSysInfo::prettyProductName();
-        qCInfo(main) << "Kernel:" << QSysInfo::kernelType() << QSysInfo::kernelVersion();
-        qCInfo(main) << "CPU Architecture:" << QSysInfo::currentCpuArchitecture();
-        qCInfo(main) << "Qt Build ABI:" << QSysInfo::buildAbi();
-        qCInfo(main) << "Application Path:" << QCoreApplication::applicationDirPath();
-        qCInfo(main) << "Working Directory:" << QDir::currentPath();
+        qDebug() << "=== System Information ===";
+        qDebug() << "OS:" << QSysInfo::prettyProductName();
+        qDebug() << "Kernel:" << QSysInfo::kernelType() << QSysInfo::kernelVersion();
+        qDebug() << "CPU Architecture:" << QSysInfo::currentCpuArchitecture();
+        qDebug() << "Qt Build ABI:" << QSysInfo::buildAbi();
+        qDebug() << "Application Path:" << QCoreApplication::applicationDirPath();
+        qDebug() << "Working Directory:" << QDir::currentPath();
         
         // Check available disk space
         QString appDataPath = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
         QStorageInfo storage(appDataPath);
         if (storage.isValid()) {
             qint64 availableGB = storage.bytesAvailable() / (1024 * 1024 * 1024);
-            qCInfo(main) << "Available disk space:" << availableGB << "GB";
+            qDebug() << "Available disk space:" << availableGB << "GB";
             
             if (availableGB < 1) {
-                qCWarning(main) << "Low disk space warning - less than 1GB available";
+                qDebug() << "Low disk space warning - less than 1GB available";
             }
         }
         
@@ -789,13 +826,13 @@ namespace EarthquakeAppUtils {
             GlobalMemoryStatusEx(&memInfo);
             qint64 totalPhysMB = memInfo.ullTotalPhys / (1024 * 1024);
             qint64 availPhysMB = memInfo.ullAvailPhys / (1024 * 1024);
-            qCInfo(main) << "Total RAM:" << totalPhysMB << "MB, Available:" << availPhysMB << "MB";
+            qDebug() << "Total RAM:" << totalPhysMB << "MB, Available:" << availPhysMB << "MB";
         #endif
         
-        qCInfo(main) << "=========================";
+        qDebug() << "=========================";
     }
     
-    bool verifyInstallation()
+    inline bool verifyInstallation()
     {
         // Check if all required resources are available
         QStringList requiredResources = {
@@ -810,19 +847,19 @@ namespace EarthquakeAppUtils {
         bool allFound = true;
         for (const QString &resource : requiredResources) {
             if (!QFile::exists(resource)) {
-                qCWarning(main) << "Missing resource:" << resource;
+                qDebug() << "Missing resource:" << resource;
                 allFound = false;
             }
         }
         
         if (!allFound) {
-            qCWarning(main) << "Some resources are missing - application may not function correctly";
+            qDebug() << "Some resources are missing - application may not function correctly";
         }
         
         return allFound;
     }
-    
-    void createDesktopShortcut()
+
+    inline void createDesktopShortcut()
     {
         // Create desktop shortcut on first run (platform-specific)
         #ifdef Q_OS_WIN
@@ -849,13 +886,13 @@ namespace EarthquakeAppUtils {
                                           QFile::ReadGroup | QFile::ExeGroup |
                                           QFile::ReadOther | QFile::ExeOther);
                 
-                qCInfo(main) << "Desktop shortcut created:" << shortcutPath;
+                qDebug() << "Desktop shortcut created:" << shortcutPath;
             }
         }
         #endif
     }
     
-    void registerFileAssociations()
+    inline void registerFileAssociations()
     {
         // Register file associations for earthquake data files
         #ifdef Q_OS_WIN
@@ -877,20 +914,21 @@ namespace EarthquakeAppUtils {
             out << "  </mime-type>\n";
             out << "</mime-info>\n";
             
-            qCInfo(main) << "MIME types registered";
+            qDebug() << "MIME types registered";
         }
         #endif
     }
-    
-    void setupCrashHandler()
+
+    inline void setupCrashHandler()
     {
         // Basic crash handling setup
         #ifdef Q_OS_WIN
-        // Windows crash handling (SetUnhandledExceptionFilter) would go here
+        // TODO
+        // Windows crash handling (SetUnhandledExceptionFilter) will go here
         #elif defined(Q_OS_UNIX)
         struct sigaction sa;
         sa.sa_handler = [](int sig) {
-            qCCritical(main) << "Application crashed with signal:" << sig;
+            qDebug() << "Application crashed with signal:" << sig;
             
             // Try to save any critical data
             QString crashLogPath = QStandardPaths::writableLocation(QStandardPaths::TempLocation) + 
@@ -901,20 +939,25 @@ namespace EarthquakeAppUtils {
                 stream << "CRASH: " << QDateTime::currentDateTime().toString() 
                        << " Signal: " << sig << "\n";
             }
-            
+
             // Try graceful cleanup
             if (QApplication::instance()) {
                 QApplication::quit();
-            } else {
-                _exit(1);
             }
+            // TODO
+            // else {
+            //     _exit(1);
+            // }
         };
-        sigemptyset(&sa.sa_mask);
-        sa.sa_flags = 0;
-        
-        sigaction(SIGSEGV, &sa, nullptr);
-        sigaction(SIGABRT, &sa, nullptr);
-        sigaction(SIGFPE, &sa, nullptr);
+        // TODO
+        // sigemptyset(&sa.sa_mask);
+        // sa.sa_flags = 0;
+        //
+        // sigaction(SIGSEGV, &sa, nullptr);
+        // sigaction(SIGABRT, &sa, nullptr);
+        // sigaction(SIGFPE, &sa, nullptr);
         #endif
     }
 }
+
+Q_DECLARE_METATYPE(EarthquakeApplication)
