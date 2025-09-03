@@ -3,7 +3,8 @@
 b/
 build/
 
-# Prerequisites
+# Various
+.DS_Store
 *.d
 
 # Compiled Object files

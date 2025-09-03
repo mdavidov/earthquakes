@@ -263,7 +263,7 @@ private:
         QCommandLineOption debugOption({"debug", "d"}, "Enable debug mode with verbose logging");
         QCommandLineOption offlineOption({"offline", "o"}, "Start in offline mode (no network requests)");
         QCommandLineOption configOption({"config", "c"}, "Use custom configuration file", "file");
-        QCommandLineOption logLevelOption({"log-level", "l"}, "Set logging level (debug, info, warning, critical)", "level", "info");
+        QCommandLineOption logLevelOption({"log-level", "g"}, "Set logging level (debug, info, warning, critical)", "level", "info");
         QCommandLineOption dataSourceOption({"data-source", "s"}, "Override default data source", "source");
         QCommandLineOption locationOption({"location", "l"}, "Set user location (lat,lon)", "coordinates");
 

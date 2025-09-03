@@ -354,62 +354,115 @@ The main.cpp includes all necessary components for professional software deploym
 
 ## Earthquake Map Widget implementation
 
-Complete Feature Set:
-Advanced Interactive Mapping:
+### Complete Feature Set
 
-Multi-projection support - Mercator, Equirectangular, Orthographic (North/South pole), Robinson
-Smooth navigation - Pan with mouse drag, zoom with wheel, keyboard controls
-Professional interactions - Context menus, tooltips, rubber band selection
-Animated transitions - Smooth animated movement to locations with easing curves
+### Advanced Interactive Mapping
 
-Sophisticated Earthquake Visualization:
+* Multi-projection support - Mercator, Equirectangular, Orthographic (North/South pole), Robinson
+* Smooth navigation - Pan with mouse drag, zoom with wheel, keyboard controls
+* Professional interactions - Context menus, tooltips, rubber band selection
+* Animated transitions - Smooth animated movement to locations with easing curves
 
-Multiple display modes - Circles, squares, diamonds, crosses, heatmap visualization
-Dynamic color schemes - Color by magnitude, depth, age, alert level, or data source
-Smart clustering - Automatic grouping of nearby earthquakes with expandable clusters
-Real-time animations - Pulse, ripple, fade, grow, shake effects for recent earthquakes
-Adaptive sizing - Logarithmic earthquake sizing that scales with zoom level
+### Sophisticated Earthquake Visualization
 
-Professional Rendering Engine:
+* Multiple display modes - Circles, squares, diamonds, crosses, heatmap visualization
+* Dynamic color schemes - Color by magnitude, depth, age, alert level, or data source
+* Smart clustering - Automatic grouping of nearby earthquakes with expandable clusters
+* Real-time animations - Pulse, ripple, fade, grow, shake effects for recent earthquakes
+* Adaptive sizing - Logarithmic earthquake sizing that scales with zoom level
 
-High-performance caching - Background and layer caching for smooth interaction
-Level-of-detail optimization - Automatic quality adjustment based on zoom and data density
-Smart culling - Only renders visible elements for optimal performance
-Anti-aliased graphics - Professional quality rendering with smooth edges
+### Professional Rendering Engine
+
+* High-performance caching - Background and layer caching for smooth interaction
+* Level-of-detail optimization - Automatic quality adjustment based on zoom and data density
+* Smart culling - Only renders visible elements for optimal performance
+* Anti-aliased graphics - Professional quality rendering with smooth edges
 Thread-safe operations - Mutex-protected data access for real-time updates
 
-Rich User Interface:
+Rich User Interface
 
-Interactive legend - Dynamic legend showing magnitude scale, statistics, and color scheme
-Coordinate display - Real-time lat/lon coordinates at cursor position
-Scale bar - Adaptive scale indicator with appropriate distance units
-Selection tools - Single-click, multi-select with Ctrl/Shift, rubber band selection
-Comprehensive tooltips - Detailed earthquake information on hover
+* Interactive legend - Dynamic legend showing magnitude scale, statistics, and color scheme
+* Coordinate display - Real-time lat/lon coordinates at cursor position
+* Scale bar - Adaptive scale indicator with appropriate distance units
+* Selection tools - Single-click, multi-select with Ctrl/Shift, rubber band selection
+* Comprehensive tooltips - Detailed earthquake information on hover
 
-Advanced Data Management:
+### Advanced Data Management
 
-Real-time updates - Add, remove, update earthquakes without interruption
-Smart filtering - Filter by magnitude, depth, time range, geographic bounds
-Spatial indexing - Efficient hit-testing and spatial queries
-Export capabilities - High-quality image export in multiple formats
-Settings persistence - Automatic save/restore of all user preferences
+* Real-time updates - Add, remove, update earthquakes without interruption
+* Smart filtering - Filter by magnitude, depth, time range, geographic bounds
+* Spatial indexing - Efficient hit-testing and spatial queries
+* Export capabilities - High-quality image export in multiple formats
+* Settings persistence - Automatic save/restore of all user preferences
 
 Professional Development Features:
 
-Debug overlay - Development information display (Ctrl+hover)
-Performance monitoring - Built-in performance optimization and monitoring
-Extensible architecture - Easy to add new map layers, projections, and display modes
-Memory efficient - Smart cache management and resource cleanup
-Cross-platform - Native Qt implementation works on Windows, macOS, Linux
+* Debug overlay - Development information display (Ctrl+hover)
+* Performance monitoring - Built-in performance optimization and monitoring
+* Extensible architecture - Easy to add new map layers, projections, and display modes
+* Memory efficient - Smart cache management and resource cleanup
+* Cross-platform - Native Qt implementation works on Windows, macOS, Linux
 
-Integration Ready:
+### Integration Ready
+
 The widget integrates seamlessly with the other system components:
 
-Signal/slot architecture - Qt-native event system for clean integration
-Thread-safe API - Safe to call from any thread with mutex protection
-Settings integration - Works with QSettings for preference persistence
-Network ready - Built-in support for downloading map tiles and data
-Animation system - Smooth 30 FPS animations with configurable timing
+* Signal/slot architecture - Qt-native event system for clean integration
+* Thread-safe API - Safe to call from any thread with mutex protection
+* Settings integration - Works with QSettings for preference persistence
+* Network ready - Built-in support for downloading map tiles and data
+* Animation system - Smooth 30 FPS animations with configurable timing
 
 This EarthquakeMapWidget provides a professional-grade mapping component that rivals commercial GIS applications while being specifically optimized for earthquake data visualization. It handles everything from small datasets to thousands of earthquakes with smooth performance and rich interactivity.
 
+## EarthquakeMapWidget Class
+
+### Key Features:
+
+#### 1. Performance-Optimized Rendering
+
+* Viewport culling to skip off-screen earthquakes
+* Level-of-detail system that adjusts quality based on zoom
+* Background caching to avoid re-rendering static content
+* Limits maximum rendered earthquakes for smooth performance
+
+#### 2. Multi-Layer Rendering Architecture
+
+* Background Layer: Cached map data and geographic features
+* Dynamic Content: Earthquakes, clusters, selections
+* UI Overlays: Legend, scale bar, coordinates, status indicators
+
+#### 3. Visual Effects
+
+* Earthquake rendering with multiple display modes (circles, squares, diamonds, crosses)
+* Animation support with opacity and size effects
+* Hover and selection highlighting
+* Real-time coordinate display under mouse cursor
+
+#### 4. Earthquake Visualization
+
+* Size-based magnitude representation
+* Color-coded earthquakes based on ColorScheme settings
+* Magnitude labels for significant earthquakes
+* Time labels when enabled
+
+#### 5. Interactive Features
+
+* Selection rubber band rendering
+* Hover effects with glow
+* Status overlays (offline indicator, loading state, performance warnings)
+
+### Performance Considerations
+
+The implementation includes several optimizations crucial for real-time earthquake monitoring:
+
+* Spatial culling removes earthquakes outside the viewport
+* Magnitude-based sorting renders smaller earthquakes first (painters algorithm)
+* Level-of-detail culling skips minor earthquakes at low zoom levels
+* Render limits prevent UI freezing with large datasets
+* Cached backgrounds avoid re-rendering static map content
+
+### Thread Safety:
+
+* Uses existing m_dataMutex to safely access earthquake data from the rendering thread while the main thread updates the data.
+* This implementation should handle both global earthquake monitoring and regional views efficiently, maintaining responsive performance even with thousands of earthquake data points while providing rich visual feedback for user interactions.
