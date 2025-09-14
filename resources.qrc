@@ -1,0 +1,10 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="/">
+        <file>alert.wav</file>
+        <file>assets/heart-monitor.png</file>
+        <file>assets/bluetooth.png</file>
+        <file>assets/record.png</file>
+        <file>assets/export.png</file>
+    </qresource>
+</RCC>

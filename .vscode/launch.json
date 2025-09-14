@@ -10,7 +10,7 @@
             "request": "launch",
             "preLaunchTask": "CMake: build",
             "program": "${command:cmake.launchTargetPath}",
-            // "args": ["-arg1", "-arg2"],
+            "args": ["--no-splash"],
         }
     ]
 }

@@ -440,17 +440,17 @@ void EarthquakeMainWindow::fetchEarthquakeData()
     statusBar()->showMessage("Fetching earthquake data...");
     
     // Example URL - replace with actual earthquake data service
-    QString url = "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson";
+    QString url = "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_month.geojson";
     QNetworkRequest request(url);
     request.setHeader(QNetworkRequest::UserAgentHeader, "EarthquakeAlertSystem/2.1");
     
     m_currentReply = m_networkManager->get(request);
 }
 
-void EarthquakeMainWindow::onDataReceived()
+void EarthquakeMainWindow::onDataReceived(QNetworkReply* reply)
 {
-    auto *reply = qobject_cast<QNetworkReply*>(sender());
-    if (!reply) return;
+    if (!reply)
+        return;
     
     if (reply->error() == QNetworkReply::NoError) {
         QByteArray data = reply->readAll();

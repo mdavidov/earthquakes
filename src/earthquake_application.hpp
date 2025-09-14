@@ -131,9 +131,9 @@ public:
                 m_mainWindow->activateWindow();
             }
 
-            if (!createLockFile()) {
-                return false;
-            }
+            // if (!createLockFile()) {
+            //     return false;
+            // }
 
             return true;
         }
@@ -694,7 +694,7 @@ private:
             stream << QDateTime::currentDateTime().toString(Qt::ISODate) << "\n";
             lockFile.close();
         }
-        return false;
+        return true;
     }
 
     void cleanup()

@@ -72,7 +72,7 @@ enum class SoundType {
 struct NotificationSettings {
     bool enabled = true;
     bool soundEnabled = true;
-    bool systemTrayEnabled = true;
+    bool systemTrayEnabled = false;
     bool desktopNotificationsEnabled = true;
     bool emailEnabled = false;
     bool smsEnabled = false;

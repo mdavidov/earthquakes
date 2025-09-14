@@ -1793,7 +1793,7 @@ void EarthquakeMapWidget::updateVisibleBounds()
 
 void EarthquakeMapWidget::updateVisibleEarthquakes()
 {
-    QMutexLocker locker(&m_dataMutex);
+    // QMutexLocker locker(&m_dataMutex);
     
     for (auto &eq : m_earthquakes) {
         eq.screenPos = latLonToScreen(eq.data.latitude, eq.data.longitude);
@@ -1901,7 +1901,7 @@ bool EarthquakeMapWidget::isInViewport(const QPointF &screenPos) const
 
 int EarthquakeMapWidget::findEarthquakeAt(const QPoint &point) const
 {
-    QMutexLocker locker(&m_dataMutex);
+    // QMutexLocker locker(&m_dataMutex);
     
     double minDistance = std::numeric_limits<double>::max();
     int closestIndex = -1;
@@ -1923,7 +1923,7 @@ int EarthquakeMapWidget::findEarthquakeAt(const QPoint &point) const
 
 QVector<int> EarthquakeMapWidget::findEarthquakesInRect(const QRect &rect) const
 {
-    QMutexLocker locker(&m_dataMutex);
+    // QMutexLocker locker(&m_dataMutex);
     QVector<int> indices;
     
     for (int i = 0; i < m_earthquakes.size(); ++i) {
@@ -1971,7 +1971,7 @@ void EarthquakeMapWidget::updateClusters()
         return;
     }
     
-    QMutexLocker locker(&m_dataMutex);
+    // QMutexLocker locker(&m_dataMutex);
     clearClusters();
     
     QVector<bool> clustered(m_earthquakes.size(), false);
@@ -2012,7 +2012,7 @@ void EarthquakeMapWidget::clearClusters()
 {
     m_clusters.clear();
     
-    QMutexLocker locker(&m_dataMutex);
+    // QMutexLocker locker(&m_dataMutex);
     for (auto &eq : m_earthquakes) {
         eq.clusterId = -1;
         eq.isClusterCenter = false;
@@ -2122,7 +2122,7 @@ void EarthquakeMapWidget::hideTooltip()
 // Selection and filtering methods
 QVector<EarthquakeData> EarthquakeMapWidget::getSelectedEarthquakes() const
 {
-    QMutexLocker locker(&m_dataMutex);
+    // QMutexLocker locker(&m_dataMutex);
     QVector<EarthquakeData> selected;
     
     for (const auto &eq : m_earthquakes) {
@@ -2142,7 +2142,7 @@ void EarthquakeMapWidget::selectEarthquake(const QString &eventId)
 
 void EarthquakeMapWidget::selectEarthquakes(const QStringList &eventIds)
 {
-    QMutexLocker locker(&m_dataMutex);
+    // QMutexLocker locker(&m_dataMutex);
     
     for (const QString &eventId : eventIds) {
         if (!m_selectedIds.contains(eventId)) {
@@ -2165,7 +2165,7 @@ void EarthquakeMapWidget::clearSelection()
 {
     if (m_selectedIds.isEmpty()) return;
     
-    QMutexLocker locker(&m_dataMutex);
+    // QMutexLocker locker(&m_dataMutex);
     
     for (auto &eq : m_earthquakes) {
         eq.isSelected = false;
@@ -2260,7 +2260,7 @@ MapBounds EarthquakeMapWidget::getVisibleBounds() const
 
 QVector<EarthquakeData> EarthquakeMapWidget::getAllEarthquakes() const
 {
-    QMutexLocker locker(&m_dataMutex);
+    // QMutexLocker locker(&m_dataMutex);
     QVector<EarthquakeData> all;
     
     for (const auto &eq : m_earthquakes) {
@@ -2272,7 +2272,7 @@ QVector<EarthquakeData> EarthquakeMapWidget::getAllEarthquakes() const
 
 QVector<EarthquakeData> EarthquakeMapWidget::getVisibleEarthquakes() const
 {
-    QMutexLocker locker(&m_dataMutex);
+    // QMutexLocker locker(&m_dataMutex);
     QVector<EarthquakeData> visible;
     
     for (const auto &eq : m_earthquakes) {
@@ -2286,7 +2286,7 @@ QVector<EarthquakeData> EarthquakeMapWidget::getVisibleEarthquakes() const
 
 int EarthquakeMapWidget::getEarthquakeCount() const
 {
-    QMutexLocker locker(&m_dataMutex);
+    // QMutexLocker locker(&m_dataMutex);
     return m_earthquakes.size();
 }
 
@@ -2397,7 +2397,7 @@ void EarthquakeMapWidget::setAnimationSpeed(double speed)
 
 void EarthquakeMapWidget::highlightEarthquake(const QString &eventId, int durationMs)
 {
-    QMutexLocker locker(&m_dataMutex);
+    // QMutexLocker locker(&m_dataMutex);
     
     for (auto &eq : m_earthquakes) {
         if (eq.data.eventId == eventId) {
@@ -2421,7 +2421,7 @@ void EarthquakeMapWidget::highlightEarthquake(const QString &eventId, int durati
         // });
         std::async(std::launch::async, [this, eventId, durationMs]() {
             std::this_thread::sleep_for(milliseconds(durationMs));
-            QMutexLocker locker(&m_dataMutex);
+            // QMutexLocker locker(&m_dataMutex);
             for (auto &eq : m_earthquakes) {
                 if (eq.data.eventId == eventId) {
                     eq.isHighlighted = false;
@@ -2435,7 +2435,7 @@ void EarthquakeMapWidget::highlightEarthquake(const QString &eventId, int durati
 
 void EarthquakeMapWidget::addEarthquakes(const QVector<EarthquakeData> &earthquakes)
 {
-    QMutexLocker locker(&m_dataMutex);
+    // QMutexLocker locker(&m_dataMutex);
     
     for (const auto &earthquake : earthquakes) {
         // Check if earthquake already exists
@@ -2480,7 +2480,7 @@ void EarthquakeMapWidget::addEarthquakes(const QVector<EarthquakeData> &earthqua
 
 void EarthquakeMapWidget::removeEarthquake(const QString &eventId)
 {
-    QMutexLocker locker(&m_dataMutex);
+    // QMutexLocker locker(&m_dataMutex);
     
     for (int i = 0; i < m_earthquakes.size(); ++i) {
         if (m_earthquakes[i].data.eventId == eventId) {
@@ -2497,7 +2497,7 @@ void EarthquakeMapWidget::removeEarthquake(const QString &eventId)
 
 void EarthquakeMapWidget::clearEarthquakes()
 {
-    QMutexLocker locker(&m_dataMutex);
+    // QMutexLocker locker(&m_dataMutex);
     
     m_earthquakes.clear();
     m_selectedIds.clear();
@@ -2509,7 +2509,7 @@ void EarthquakeMapWidget::clearEarthquakes()
 
 void EarthquakeMapWidget::updateEarthquake(const EarthquakeData &earthquake)
 {
-    QMutexLocker locker(&m_dataMutex);
+    // QMutexLocker locker(&m_dataMutex);
     
     for (auto &eq : m_earthquakes) {
         if (eq.data.eventId == earthquake.eventId) {
@@ -2618,7 +2618,7 @@ EarthquakeData EarthquakeMapWidget::getEarthquakeAt(const QPoint &point) const
 {
     int index = findEarthquakeAt(point);
     if (index >= 0) {
-        QMutexLocker locker(&m_dataMutex);
+        // QMutexLocker locker(&m_dataMutex);
         return m_earthquakes[index].data;
     }
     return EarthquakeData(); // Return empty data
@@ -2626,7 +2626,7 @@ EarthquakeData EarthquakeMapWidget::getEarthquakeAt(const QPoint &point) const
 
 QVector<EarthquakeData> EarthquakeMapWidget::getEarthquakesInRegion(const MapBounds &bounds) const
 {
-    QMutexLocker locker(&m_dataMutex);
+    // QMutexLocker locker(&m_dataMutex);
     QVector<EarthquakeData> result;
     
     for (const auto &eq : m_earthquakes) {
@@ -2682,7 +2682,7 @@ void EarthquakeMapWidget::flashEarthquake(const QString &eventId, int times)
     connect(flashTimer, &QTimer::timeout, [this, eventId, flashTimer, flashCount, maxFlashes]() mutable {
         bool highlight = (flashCount % 2 == 0);
         
-        QMutexLocker locker(&m_dataMutex);
+        // QMutexLocker locker(&m_dataMutex);
         for (auto &eq : m_earthquakes) {
             if (eq.data.eventId == eventId) {
                 eq.isHighlighted = highlight;
@@ -2747,7 +2747,7 @@ void EarthquakeMapWidget::animateToLocation(double latitude, double longitude, d
 QDateTime EarthquakeMapWidget::getLastUpdateTime() const
 {
     QDateTime latest;
-    QMutexLocker locker(&m_dataMutex);
+    // QMutexLocker locker(&m_dataMutex);
     
     for (const auto &eq : m_earthquakes) {
         if (!latest.isValid() || eq.lastUpdate > latest) {
@@ -2912,7 +2912,7 @@ void EarthquakeMapWidget::expandCluster(int clusterId)
     cluster.isExpanded = true;
     
     // Animate individual earthquakes outward from cluster center
-    QMutexLocker locker(&m_dataMutex);
+    // QMutexLocker locker(&m_dataMutex);
     for (int eqId : cluster.earthquakeIds) {
         if (eqId >= 0 && eqId < m_earthquakes.size()) {
             m_earthquakes[eqId].clusterId = -1; // Remove from cluster
@@ -2946,7 +2946,7 @@ void EarthquakeMapWidget::collapseCluster(int clusterId)
     cluster.isExpanded = false;
     
     // Re-assign earthquakes to cluster
-    QMutexLocker locker(&m_dataMutex);
+    // QMutexLocker locker(&m_dataMutex);
     for (int eqId : cluster.earthquakeIds) {
         if (eqId >= 0 && eqId < m_earthquakes.size()) {
             m_earthquakes[eqId].clusterId = clusterId;
@@ -2958,7 +2958,7 @@ void EarthquakeMapWidget::collapseCluster(int clusterId)
 
 void EarthquakeMapWidget::cullOffscreenEarthquakes()
 {
-    QMutexLocker locker(&m_dataMutex);
+    // QMutexLocker locker(&m_dataMutex);
     
     QRect extendedViewport = rect().adjusted(-200, -200, 200, 200);
     
@@ -3010,7 +3010,7 @@ void EarthquakeMapWidget::spatialIndex()
 {
     // Simple spatial indexing - in a real implementation you might use a quadtree
     // For now, just ensure earthquakes are sorted by screen position for faster lookup
-    QMutexLocker locker(&m_dataMutex);
+    // QMutexLocker locker(&m_dataMutex);
     
     std::sort(m_earthquakes.begin(), m_earthquakes.end(), 
               [](const VisualEarthquake &a, const VisualEarthquake &b) {

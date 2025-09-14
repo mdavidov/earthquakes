@@ -51,7 +51,7 @@ protected:
 public slots:
     // Data management
     void fetchEarthquakeData();
-    void onDataReceived();
+    void onDataReceived(QNetworkReply* reply);
     void onNetworkError(int error);
     void refreshData();
     void exportData();

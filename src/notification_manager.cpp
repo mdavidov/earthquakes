@@ -47,7 +47,7 @@ NotificationManager::NotificationManager(QObject *parent)
     m_qsettings = new QSettings("EarthquakeAlertSystem", "NotificationManager", this);
 
     // Initialize components
-    initializeSystemTray();
+    // initializeSystemTray();
     initializeAudioSystem();
     initializeNetworkManager();
     createNotificationDirectory();

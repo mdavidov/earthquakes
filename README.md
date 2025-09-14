@@ -462,7 +462,7 @@ The implementation includes several optimizations crucial for real-time earthqua
 * Render limits prevent UI freezing with large datasets
 * Cached backgrounds avoid re-rendering static map content
 
-### Thread Safety:
+### Thread Safety
 
 * Uses existing m_dataMutex to safely access earthquake data from the rendering thread while the main thread updates the data.
 * This implementation should handle both global earthquake monitoring and regional views efficiently, maintaining responsive performance even with thousands of earthquake data points while providing rich visual feedback for user interactions.
